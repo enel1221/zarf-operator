@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- ops_v1alpha1_zarfpackage.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

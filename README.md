@@ -1,23 +1,13 @@
-# Zarf Operator
-
-A Kubernetes operator for managing Zarf package deployments with integrated security scanning and lifecycle management.
+# zarf-operator
+// TODO(user): Add simple overview of use/purpose
 
 ## Description
-
-The Zarf Operator automates the deployment, management, and security scanning of Zarf packages in Kubernetes environments. Built with Kubebuilder, it provides a cloud-native approach to managing air-gapped application deployments with comprehensive vulnerability scanning using Grype.
-
-**Key Features:**
-- 🚀 **Automated Package Management**: Deploy, update, and remove Zarf packages declaratively
-- 🔒 **Integrated Security Scanning**: Built-in Grype vulnerability scanning with historical tracking
-- 📊 **Production Ready**: Circuit breaker patterns, comprehensive logging, and robust error handling
-- 🔄 **Lifecycle Management**: Proper finalizer handling for clean resource cleanup
-- 📈 **Observability**: Full integration with Kubernetes events and status reporting
-- 🏢 **Enterprise Features**: RBAC integration, multi-tenancy support, and operational monitoring
+// TODO(user): An in-depth paragraph about your project and overview of use
 
 ## Getting Started
 
 ### Prerequisites
-- go version v1.24.0+
+- go version v1.23.0+
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
@@ -121,39 +111,7 @@ previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml
 is manually re-applied afterwards.
 
 ## Contributing
-
-We welcome contributions to the Zarf Operator! Here's how you can help:
-
-### Development Setup
-
-1. **Fork and Clone**:
-   ```bash
-   git clone https://github.com/your-username/zarf-operator.git
-   cd zarf-operator
-   ```
-
-2. **Install Dependencies**:
-   ```bash
-   make install-deps
-   ```
-
-3. **Run Tests**:
-   ```bash
-   make test
-   make test-e2e
-   ```
-
-### Contribution Guidelines
-
-- **Issues**: Use GitHub Issues for bug reports and feature requests
-- **Pull Requests**: Follow the standard GitHub flow with descriptive commit messages
-- **Code Style**: Run `make fmt` and `make vet` before submitting
-- **Testing**: Ensure all tests pass and add tests for new features
-- **Documentation**: Update relevant documentation for any changes
-
-### Code of Conduct
-
-This project follows the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/master/code-of-conduct.md).
+// TODO(user): Add detailed information on how you would like others to contribute to this project
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 
@@ -161,7 +119,7 @@ More information can be found via the [Kubebuilder Documentation](https://book.k
 
 ## License
 
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

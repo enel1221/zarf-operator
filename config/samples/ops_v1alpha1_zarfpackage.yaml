@@ -1,0 +1,9 @@
+apiVersion: ops.d0s.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  labels:
+    app.kubernetes.io/name: zarf-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: zarfpackage-sample
+spec:
+  # TODO(user): Add fields here
