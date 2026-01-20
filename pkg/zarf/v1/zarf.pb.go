@@ -39,6 +39,9 @@ type DeployRequest struct {
 	LogLevel                string                 `protobuf:"bytes,13,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
 	LogFormat               string                 `protobuf:"bytes,14,opt,name=log_format,json=logFormat,proto3" json:"log_format,omitempty"`
 	NoColor                 bool                   `protobuf:"varint,15,opt,name=no_color,json=noColor,proto3" json:"no_color,omitempty"`
+	PlainHttp               bool                   `protobuf:"varint,16,opt,name=plain_http,json=plainHttp,proto3" json:"plain_http,omitempty"`
+	InsecureSkipTlsVerify   bool                   `protobuf:"varint,17,opt,name=insecure_skip_tls_verify,json=insecureSkipTlsVerify,proto3" json:"insecure_skip_tls_verify,omitempty"`
+	SkipVersionCheck        bool                   `protobuf:"varint,18,opt,name=skip_version_check,json=skipVersionCheck,proto3" json:"skip_version_check,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -174,6 +177,27 @@ func (x *DeployRequest) GetLogFormat() string {
 func (x *DeployRequest) GetNoColor() bool {
 	if x != nil {
 		return x.NoColor
+	}
+	return false
+}
+
+func (x *DeployRequest) GetPlainHttp() bool {
+	if x != nil {
+		return x.PlainHttp
+	}
+	return false
+}
+
+func (x *DeployRequest) GetInsecureSkipTlsVerify() bool {
+	if x != nil {
+		return x.InsecureSkipTlsVerify
+	}
+	return false
+}
+
+func (x *DeployRequest) GetSkipVersionCheck() bool {
+	if x != nil {
+		return x.SkipVersionCheck
 	}
 	return false
 }
@@ -383,11 +407,14 @@ func (x *InstalledChart) GetStatus() string {
 }
 
 type RemoveRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PackageName   string                 `protobuf:"bytes,1,opt,name=package_name,json=packageName,proto3" json:"package_name,omitempty"`
-	Components    []string               `protobuf:"bytes,2,rep,name=components,proto3" json:"components,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	PackageName       string                 `protobuf:"bytes,1,opt,name=package_name,json=packageName,proto3" json:"package_name,omitempty"`
+	Components        []string               `protobuf:"bytes,2,rep,name=components,proto3" json:"components,omitempty"`
+	Timeout           *durationpb.Duration   `protobuf:"bytes,3,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	NamespaceOverride string                 `protobuf:"bytes,4,opt,name=namespace_override,json=namespaceOverride,proto3" json:"namespace_override,omitempty"`
+	SkipVersionCheck  bool                   `protobuf:"varint,5,opt,name=skip_version_check,json=skipVersionCheck,proto3" json:"skip_version_check,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RemoveRequest) Reset() {
@@ -432,6 +459,27 @@ func (x *RemoveRequest) GetComponents() []string {
 		return x.Components
 	}
 	return nil
+}
+
+func (x *RemoveRequest) GetTimeout() *durationpb.Duration {
+	if x != nil {
+		return x.Timeout
+	}
+	return nil
+}
+
+func (x *RemoveRequest) GetNamespaceOverride() string {
+	if x != nil {
+		return x.NamespaceOverride
+	}
+	return ""
+}
+
+func (x *RemoveRequest) GetSkipVersionCheck() bool {
+	if x != nil {
+		return x.SkipVersionCheck
+	}
+	return false
 }
 
 type RemoveResponse struct {
@@ -958,6 +1006,7 @@ type HealthResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Healthy       bool                   `protobuf:"varint,1,opt,name=healthy,proto3" json:"healthy,omitempty"`
 	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1006,11 +1055,18 @@ func (x *HealthResponse) GetVersion() string {
 	return ""
 }
 
+func (x *HealthResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_zarf_v1_zarf_proto protoreflect.FileDescriptor
 
 const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\n" +
-	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xaf\x05\n" +
+	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xb5\x06\n" +
 	"\rDeployRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1e\n" +
 	"\n" +
@@ -1030,7 +1086,11 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\tlog_level\x18\r \x01(\tR\blogLevel\x12\x1d\n" +
 	"\n" +
 	"log_format\x18\x0e \x01(\tR\tlogFormat\x12\x19\n" +
-	"\bno_color\x18\x0f \x01(\bR\anoColor\x1a?\n" +
+	"\bno_color\x18\x0f \x01(\bR\anoColor\x12\x1d\n" +
+	"\n" +
+	"plain_http\x18\x10 \x01(\bR\tplainHttp\x127\n" +
+	"\x18insecure_skip_tls_verify\x18\x11 \x01(\bR\x15insecureSkipTlsVerify\x12,\n" +
+	"\x12skip_version_check\x18\x12 \x01(\bR\x10skipVersionCheck\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd0\x01\n" +
@@ -1051,12 +1111,15 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x1d\n" +
 	"\n" +
 	"chart_name\x18\x02 \x01(\tR\tchartName\x12\x16\n" +
-	"\x06status\x18\x03 \x01(\tR\x06status\"R\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\"\xe4\x01\n" +
 	"\rRemoveRequest\x12!\n" +
 	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\x12\x1e\n" +
 	"\n" +
 	"components\x18\x02 \x03(\tR\n" +
-	"components\"&\n" +
+	"components\x123\n" +
+	"\atimeout\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12-\n" +
+	"\x12namespace_override\x18\x04 \x01(\tR\x11namespaceOverride\x12,\n" +
+	"\x12skip_version_check\x18\x05 \x01(\bR\x10skipVersionCheck\"&\n" +
 	"\x0eRemoveResponse\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\">\n" +
 	"\x19GetDeployedPackageRequest\x12!\n" +
@@ -1091,10 +1154,11 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"components\x18\x04 \x03(\tR\n" +
 	"components\x12\"\n" +
 	"\farchitecture\x18\x05 \x01(\tR\farchitecture\"\x0f\n" +
-	"\rHealthRequest\"D\n" +
+	"\rHealthRequest\"^\n" +
 	"\x0eHealthResponse\x12\x18\n" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\tR\aversion2\xe1\x03\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage2\xe1\x03\n" +
 	"\vZarfService\x129\n" +
 	"\x06Deploy\x12\x16.zarf.v1.DeployRequest\x1a\x17.zarf.v1.DeployResponse\x129\n" +
 	"\x06Remove\x12\x16.zarf.v1.RemoveRequest\x1a\x17.zarf.v1.RemoveResponse\x12]\n" +
@@ -1141,27 +1205,28 @@ var file_zarf_v1_zarf_proto_depIdxs = []int32{
 	17, // 1: zarf.v1.DeployRequest.timeout:type_name -> google.protobuf.Duration
 	2,  // 2: zarf.v1.DeployResponse.deployed_components:type_name -> zarf.v1.DeployedComponent
 	3,  // 3: zarf.v1.DeployedComponent.installed_charts:type_name -> zarf.v1.InstalledChart
-	10, // 4: zarf.v1.GetDeployedPackageResponse.package:type_name -> zarf.v1.PackageInfo
-	10, // 5: zarf.v1.ListDeployedPackagesResponse.packages:type_name -> zarf.v1.PackageInfo
-	2,  // 6: zarf.v1.PackageInfo.deployed_components:type_name -> zarf.v1.DeployedComponent
-	13, // 7: zarf.v1.GetPackageMetadataResponse.metadata:type_name -> zarf.v1.PackageMetadata
-	0,  // 8: zarf.v1.ZarfService.Deploy:input_type -> zarf.v1.DeployRequest
-	4,  // 9: zarf.v1.ZarfService.Remove:input_type -> zarf.v1.RemoveRequest
-	6,  // 10: zarf.v1.ZarfService.GetDeployedPackage:input_type -> zarf.v1.GetDeployedPackageRequest
-	8,  // 11: zarf.v1.ZarfService.ListDeployedPackages:input_type -> zarf.v1.ListDeployedPackagesRequest
-	11, // 12: zarf.v1.ZarfService.GetPackageMetadata:input_type -> zarf.v1.GetPackageMetadataRequest
-	14, // 13: zarf.v1.ZarfService.Health:input_type -> zarf.v1.HealthRequest
-	1,  // 14: zarf.v1.ZarfService.Deploy:output_type -> zarf.v1.DeployResponse
-	5,  // 15: zarf.v1.ZarfService.Remove:output_type -> zarf.v1.RemoveResponse
-	7,  // 16: zarf.v1.ZarfService.GetDeployedPackage:output_type -> zarf.v1.GetDeployedPackageResponse
-	9,  // 17: zarf.v1.ZarfService.ListDeployedPackages:output_type -> zarf.v1.ListDeployedPackagesResponse
-	12, // 18: zarf.v1.ZarfService.GetPackageMetadata:output_type -> zarf.v1.GetPackageMetadataResponse
-	15, // 19: zarf.v1.ZarfService.Health:output_type -> zarf.v1.HealthResponse
-	14, // [14:20] is the sub-list for method output_type
-	8,  // [8:14] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	17, // 4: zarf.v1.RemoveRequest.timeout:type_name -> google.protobuf.Duration
+	10, // 5: zarf.v1.GetDeployedPackageResponse.package:type_name -> zarf.v1.PackageInfo
+	10, // 6: zarf.v1.ListDeployedPackagesResponse.packages:type_name -> zarf.v1.PackageInfo
+	2,  // 7: zarf.v1.PackageInfo.deployed_components:type_name -> zarf.v1.DeployedComponent
+	13, // 8: zarf.v1.GetPackageMetadataResponse.metadata:type_name -> zarf.v1.PackageMetadata
+	0,  // 9: zarf.v1.ZarfService.Deploy:input_type -> zarf.v1.DeployRequest
+	4,  // 10: zarf.v1.ZarfService.Remove:input_type -> zarf.v1.RemoveRequest
+	6,  // 11: zarf.v1.ZarfService.GetDeployedPackage:input_type -> zarf.v1.GetDeployedPackageRequest
+	8,  // 12: zarf.v1.ZarfService.ListDeployedPackages:input_type -> zarf.v1.ListDeployedPackagesRequest
+	11, // 13: zarf.v1.ZarfService.GetPackageMetadata:input_type -> zarf.v1.GetPackageMetadataRequest
+	14, // 14: zarf.v1.ZarfService.Health:input_type -> zarf.v1.HealthRequest
+	1,  // 15: zarf.v1.ZarfService.Deploy:output_type -> zarf.v1.DeployResponse
+	5,  // 16: zarf.v1.ZarfService.Remove:output_type -> zarf.v1.RemoveResponse
+	7,  // 17: zarf.v1.ZarfService.GetDeployedPackage:output_type -> zarf.v1.GetDeployedPackageResponse
+	9,  // 18: zarf.v1.ZarfService.ListDeployedPackages:output_type -> zarf.v1.ListDeployedPackagesResponse
+	12, // 19: zarf.v1.ZarfService.GetPackageMetadata:output_type -> zarf.v1.GetPackageMetadataResponse
+	15, // 20: zarf.v1.ZarfService.Health:output_type -> zarf.v1.HealthResponse
+	15, // [15:21] is the sub-list for method output_type
+	9,  // [9:15] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_zarf_v1_zarf_proto_init() }

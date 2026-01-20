@@ -53,6 +53,9 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		LogLevel:                opts.LogLevel,
 		LogFormat:               opts.LogFormat,
 		NoColor:                 opts.NoColor,
+		PlainHttp:				 opts.PlainHTTP,
+		InsecureSkipTlsVerify:   opts.InsecureSkipTLSVerify,
+		SkipVersionCheck: 		 opts.SkipVersionCheck,
 	}
 
 	resp, err := c.client.Deploy(ctx, req)
@@ -105,12 +108,17 @@ func (c *Client) ListDeployedPackages(ctx context.Context) ([]zarf.PackageInfo, 
 
 // Remove removes a deployed package
 func (c *Client) Remove(ctx context.Context, opts zarf.RemoveOptions) error {
-	resp, err := c.client.Remove(ctx, &zarfv1.RemoveRequest{
-		PackageName: opts.PackageName,
-		Components:  opts.Components,
-	})
+	req := &zarfv1.RemoveRequest{
+		PackageName:       opts.PackageName,
+		Components:        opts.Components,
+		Timeout:           durationpb.New(opts.Timeout),
+		NamespaceOverride: opts.NamespaceOverride,
+		SkipVersionCheck:  opts.SkipVersionCheck,
+	}
+
+	resp, err := c.client.Remove(ctx, req)
 	if err != nil {
-		return err
+		return fmt.Errorf("remove failed: %w", err)
 	}
 	if resp.Error != "" {
 		return fmt.Errorf("remove error: %s", resp.Error)

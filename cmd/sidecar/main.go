@@ -19,6 +19,10 @@ import (
 	"github.com/zarf-dev/zarf/src/pkg/logger"
 )
 
+var (
+	Version = "dev" // set at build time
+)
+
 func main() {
 	port := flag.Int("port", 50051, "gRPC server port")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
@@ -67,7 +71,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 
 	// Register Zarf service
-	zarfServer := server.NewZarfServer(baseLogger, baseConfig)
+	zarfServer := server.NewZarfServer(baseLogger, baseConfig, Version)
 	zarfv1.RegisterZarfServiceServer(grpcServer, zarfServer)
 
 	// Register health check

@@ -4,11 +4,19 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"runtime"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/zarf-dev/zarf/src/pkg/cluster"
 	"github.com/zarf-dev/zarf/src/pkg/logger"
 	"github.com/zarf-dev/zarf/src/pkg/packager"
+	"github.com/zarf-dev/zarf/src/pkg/packager/filters"
 	"github.com/zarf-dev/zarf/src/pkg/state"
+	"github.com/zarf-dev/zarf/src/pkg/zoci"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
 )
@@ -17,15 +25,25 @@ type ZarfServer struct {
 	zarfv1.UnimplementedZarfServiceServer
 	baseLogger *slog.Logger
 	baseConfig logger.Config
+	version	   string
+	cachePath  string
 }
 
-func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config) *ZarfServer {
+func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version string) *ZarfServer {
 	if baseLogger == nil {
 		baseLogger = logger.Default()
 	}
+
+	cachePath := os.Getenv("ZARF_CACHE_PATH")
+	if cachePath == "" {
+		cachePath = "/cache"
+	}
+
 	return &ZarfServer{
 		baseLogger: baseLogger,
 		baseConfig: baseConfig,
+		version:    version,
+		cachePath:  cachePath,
 	}
 }
 
@@ -69,6 +87,30 @@ func (s *ZarfServer) baseLoggerWithContext(ctx context.Context) (*slog.Logger, c
 
 func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*zarfv1.DeployResponse, error) {
 	log, ctx := s.loggerForRequest(ctx, req)
+
+	// Apply Zarf defaults for headless operation
+	if req.Retries == 0 {
+		req.Retries = 3
+	}
+	if req.Timeout == nil || req.Timeout.AsDuration() == 0 {
+		req.Timeout = durationpb.New(15 * time.Minute)
+	}
+	if req.OciConcurrency == 0 {
+		req.OciConcurrency = 6
+	}
+
+	// Auto-detect architecture from cluster node labels
+	if req.Architecture == "" {
+		arch, err := s.getClusterArchitecture(ctx)
+		if err != nil {
+			log.Warn("failed to detect cluster arch, using runtime", "error", err)
+			req.Architecture = runtime.GOARCH
+		} else {
+			req.Architecture = arch
+			log.Info("auto-detected cluster arch", "arch", arch)
+		}
+	}
+
 	log.Info("deploy request received",
 		"source", req.Source,
 		"components", req.Components,
@@ -85,6 +127,9 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		PublicKeyPath:  req.PublicKeyPath,
 		Verify:         !req.SkipSignatureValidation,
 		OCIConcurrency: int(req.OciConcurrency),
+		Filter:			filters.Empty(),
+		LayersSelector: zoci.AllLayers,
+		CachePath: 		s.cachePath,
 	}
 	log.Debug("loading package", "source", req.Source, "architecture", req.Architecture)
 
@@ -97,12 +142,18 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 
 	// Deploy the package
 	deployOpts := packager.DeployOptions{
-		SetVariables:           req.SetVariables,
-		AdoptExistingResources: req.AdoptExistingResources,
-		Timeout:                req.Timeout.AsDuration(),
-		Retries:                int(req.Retries),
-		NamespaceOverride:      req.NamespaceOverride,
-		OCIConcurrency:         int(req.OciConcurrency),
+		SetVariables:              req.SetVariables,
+		AdoptExistingResources:    req.AdoptExistingResources,
+		Timeout:                   req.Timeout.AsDuration(),
+		Retries:                   int(req.Retries),
+		NamespaceOverride:         req.NamespaceOverride,
+		OCIConcurrency:            int(req.OciConcurrency),
+		IsInteractive:  		   false,
+		SkipVersionCheck: 		   req.SkipVersionCheck,
+		RemoteOptions:			   packager.RemoteOptions{
+			PlainHTTP: 			   req.PlainHttp,
+			InsecureSkipTLSVerify: req.InsecureSkipTlsVerify,
+		},
 	}
 	log.Debug("deploying package", "package", pkgLayout.Pkg.Metadata.Name, "version", pkgLayout.Pkg.Metadata.Version)
 
@@ -189,10 +240,44 @@ func (s *ZarfServer) ListDeployedPackages(ctx context.Context, req *zarfv1.ListD
 }
 
 func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*zarfv1.RemoveResponse, error) {
-	log, _ := s.baseLoggerWithContext(ctx)
-	log.Warn("remove not implemented", "package", req.PackageName, "components", req.Components)
-	// Implementation uses packager.Remove
-	// Similar pattern to Deploy
+	log, ctx := s.baseLoggerWithContext(ctx)
+	log.Info("remove request received", "package", req.PackageName, "components", req.Components)
+
+	// Connect to cluster
+	c, err := cluster.New(ctx)
+	if err != nil {
+		log.Error("failed to connect to cluster", "error", err)
+		return &zarfv1.RemoveResponse{Error: fmt.Sprintf("failed to connect to cluster: %v", err)}, nil
+	}
+
+	// Get deployed package to retrieve the full package definition
+	deployedPkg, err := c.GetDeployedPackage(ctx, req.PackageName)
+	if err != nil {
+		log.Error("failed to get deployed package", "error", err, "package", req.PackageName)
+		return &zarfv1.RemoveResponse{Error: fmt.Sprintf("failed to get deployed package: %v", err)}, nil
+	}
+
+	// Set timeout default
+	timeout := 15 * time.Minute
+	if req.Timeout != nil && req.Timeout.AsDuration() > 0 {
+		timeout = req.Timeout.AsDuration()
+	}
+
+	// Build remove options
+	removeOpts := packager.RemoveOptions{
+		Cluster:			c,
+		Timeout:  			timeout,
+		NamespaceOverride:  req.NamespaceOverride,
+		SkipVersionCheck:	req.SkipVersionCheck,
+	}
+
+	// Perform removal
+	if err := packager.Remove(ctx, deployedPkg.Data, removeOpts); err != nil {
+		log.Error("removal failed", "error", err, "package", req.PackageName)
+		return &zarfv1.RemoveResponse{Error: fmt.Sprintf("removal failed: %v", err)}, nil
+	}
+
+	log.Info("package removed successfully", "package", req.PackageName)
 	return &zarfv1.RemoveResponse{}, nil
 }
 
@@ -228,9 +313,29 @@ func (s *ZarfServer) GetPackageMetadata(ctx context.Context, req *zarfv1.GetPack
 func (s *ZarfServer) Health(ctx context.Context, req *zarfv1.HealthRequest) (*zarfv1.HealthResponse, error) {
 	log, _ := s.baseLoggerWithContext(ctx)
 	log.Debug("health check")
+
+	// Validate cluster connectivity
+	healthy := true
+	message := ""
+
+	c, err := cluster.New(ctx)
+	if err != nil {
+		healthy = false
+		message = fmt.Sprintf("cluster connectivity failed: %v", err)
+		log.Warn("health check failed", "error", err)
+	} else {
+		// Connectivity test
+		_, err := c.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1})
+		if err != nil {
+			healthy = false
+			message = fmt.Sprintf("cluster API test failed: %v", err)
+		}
+	}
+
 	return &zarfv1.HealthResponse{
-		Healthy: true,
-		Version: "1.0.0",
+		Healthy: healthy,
+		Version: s.version,
+		Message: message,
 	}, nil
 }
 
@@ -265,4 +370,28 @@ func convertPackageInfo(pkg *state.DeployedPackage) *zarfv1.PackageInfo {
 		DeployedComponents: components,
 		NamespaceOverride:  pkg.NamespaceOverride,
 	}
+}
+
+// getClusterArchitecture queries the cluster to determine the node architecture
+func (s *ZarfServer) getClusterArchitecture(ctx context.Context) (string, error) {
+	c, err := cluster.New(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to cluster: %w", err)
+	}
+
+	nodeList, err := c.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	if len(nodeList.Items) == 0 {
+		return runtime.GOARCH, nil
+	}
+
+	arch := nodeList.Items[0].Status.NodeInfo.Architecture
+	if arch == "" {
+		return runtime.GOARCH, nil
+	}
+
+	return arch, nil
 }

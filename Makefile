@@ -106,7 +106,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: build-sidecar
 build-sidecar: fmt vet ## Build sidecar binary.
-	go build -o bin/zarf-sidecar cmd/sidecar/main.go
+	CGO_ENABLED=0 go build -ldflags="-X main.Version=$(VERSION)" -o bin/zarf-sidecar ./cmd/sidecar
 
 .PHONY: build-all
 build-all: build build-sidecar ## Build both manager and sidecar binaries.

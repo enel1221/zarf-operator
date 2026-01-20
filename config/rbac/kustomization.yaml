@@ -25,4 +25,6 @@ resources:
 - zarfpackage_admin_role.yaml
 - zarfpackage_editor_role.yaml
 - zarfpackage_viewer_role.yaml
-
+# Sidecar RBAC
+- sidecar_role.yaml
+- sidecar_clusterrolebinding.yaml

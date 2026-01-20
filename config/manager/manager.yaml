@@ -101,6 +101,9 @@ spec:
           - /zarf-sidecar
         args:
           - --port=50051
+        env:
+          - name: ZARF_CACHE_PATH
+            value: "/tmp/zarf-cache"
         ports:
           - containerPort: 50051
             name: grpc
@@ -134,7 +137,8 @@ spec:
             mountPath: /tmp
       volumes:
         - name: zarf-cache
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 10Gi
         - name: tmp
           emptyDir: {}
       serviceAccountName: controller-manager

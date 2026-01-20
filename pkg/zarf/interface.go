@@ -22,6 +22,9 @@ type DeployOptions struct {
 	LogLevel                string
 	LogFormat               string
 	NoColor                 bool
+	PlainHTTP				bool
+	InsecureSkipTLSVerify	bool
+	SkipVersionCheck		bool
 }
 
 // DeployResult contains the result of a deployment
@@ -77,8 +80,11 @@ type PackageInfo struct {
 
 // RemoveOptions contains options for removing a Zarf package
 type RemoveOptions struct {
-	PackageName string
-	Components  []string
+	PackageName       string
+	Components        []string
+	Timeout		      time.Duration
+	NamespaceOverride string
+	SkipVersionCheck  bool
 }
 
 // Client defines the interface for interacting with Zarf
