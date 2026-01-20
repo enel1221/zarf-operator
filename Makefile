@@ -43,11 +43,17 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+
+.PHONY: generate-proto
+generate-proto: ## Generate protobuf Go code from proto files.
+	protoc --go_out=. --go_opt=module=github.com/enel1221/zarf-operator \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/enel1221/zarf-operator \
+		-I proto proto/zarf/v1/zarf.proto
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -89,15 +95,29 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+# Sidecar image URL
+SIDECAR_IMG ?= zarf-sidecar:latest
+
 ##@ Build
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-sidecar
+build-sidecar: fmt vet ## Build sidecar binary.
+	go build -o bin/zarf-sidecar cmd/sidecar/main.go
+
+.PHONY: build-all
+build-all: build build-sidecar ## Build both manager and sidecar binaries.
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
+
+.PHONY: run-sidecar
+run-sidecar: fmt vet ## Run the sidecar from your host.
+	go run ./cmd/sidecar/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -106,9 +126,23 @@ run: manifests generate fmt vet ## Run a controller from your host.
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
+.PHONY: docker-build-sidecar
+docker-build-sidecar: ## Build docker image with the sidecar.
+	$(CONTAINER_TOOL) build -t ${SIDECAR_IMG} -f Dockerfile.sidecar .
+
+.PHONY: docker-build-all
+docker-build-all: docker-build docker-build-sidecar ## Build all docker images.
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-push-sidecar
+docker-push-sidecar: ## Push docker image with the sidecar.
+	$(CONTAINER_TOOL) push ${SIDECAR_IMG}
+
+.PHONY: docker-push-all
+docker-push-all: docker-push docker-push-sidecar ## Push all docker images.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

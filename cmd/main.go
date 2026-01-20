@@ -17,10 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
 	"path/filepath"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -39,6 +41,7 @@ import (
 
 	opsv1alpha1 "github.com/enel1221/zarf-operator/api/v1alpha1"
 	"github.com/enel1221/zarf-operator/internal/controller"
+	zarfgrpc "github.com/enel1221/zarf-operator/pkg/zarf/grpc"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,6 +66,8 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var zarfSidecarAddr string
+	var requeueInterval time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -81,6 +86,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&zarfSidecarAddr, "zarf-sidecar-address", "localhost:50051",
+		"The address of the Zarf sidecar gRPC server")
+	flag.DurationVar(&requeueInterval, "requeue-interval", 5*time.Minute,
+		"The interval at which to requeue ZarfPackage resources for reconciliation")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -202,9 +211,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Connect to Zarf sidecar
+	setupLog.Info("connecting to zarf sidecar", "address", zarfSidecarAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	zarfClient, err := zarfgrpc.NewClient(ctx, zarfSidecarAddr)
+	if err != nil {
+		setupLog.Error(err, "unable to connect to zarf sidecar - controller will wait for sidecar")
+		// Don't exit - the controller will handle nil client gracefully
+		zarfClient = nil
+	}
+
 	if err = (&controller.ZarfPackageReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		Log:             ctrl.Log.WithName("controllers").WithName("ZarfPackage"),
+		ZarfClient:      zarfClient,
+		RequeueInterval: requeueInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ZarfPackage")
 		os.Exit(1)

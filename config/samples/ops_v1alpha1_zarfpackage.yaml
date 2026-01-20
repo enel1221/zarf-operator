@@ -6,4 +6,28 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: zarfpackage-sample
 spec:
-  # TODO(user): Add fields here
+  # Source is the OCI reference to the Zarf package
+  source: "oci://ghcr.io/zarf-dev/packages/dos-games:1.2.0"
+  
+  # Optional: List of components to deploy (if empty, deploys all required components)
+  # components:
+  #   - dos-games
+  
+  # Optional: Namespace override for the deployment
+  # namespace: "games"
+  
+  # Optional: Timeout for Helm operations (default: 15m)
+  timeout: "15m"
+  
+  # Optional: Number of retries for operations
+  retries: 3
+  
+  # Optional: Set package variables
+  # set:
+  #   - "GAME_SPEED=fast"
+  
+  # Optional: Skip signature validation
+  # skipSignatureValidation: false
+  
+  # Optional: Adopt existing resources into Helm management
+  # adoptExistingResources: false
