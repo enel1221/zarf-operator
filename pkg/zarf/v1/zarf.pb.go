@@ -36,6 +36,9 @@ type DeployRequest struct {
 	Architecture            string                 `protobuf:"bytes,10,opt,name=architecture,proto3" json:"architecture,omitempty"`
 	OciConcurrency          int32                  `protobuf:"varint,11,opt,name=oci_concurrency,json=ociConcurrency,proto3" json:"oci_concurrency,omitempty"`
 	PublicKeyPath           string                 `protobuf:"bytes,12,opt,name=public_key_path,json=publicKeyPath,proto3" json:"public_key_path,omitempty"`
+	LogLevel                string                 `protobuf:"bytes,13,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
+	LogFormat               string                 `protobuf:"bytes,14,opt,name=log_format,json=logFormat,proto3" json:"log_format,omitempty"`
+	NoColor                 bool                   `protobuf:"varint,15,opt,name=no_color,json=noColor,proto3" json:"no_color,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -152,6 +155,27 @@ func (x *DeployRequest) GetPublicKeyPath() string {
 		return x.PublicKeyPath
 	}
 	return ""
+}
+
+func (x *DeployRequest) GetLogLevel() string {
+	if x != nil {
+		return x.LogLevel
+	}
+	return ""
+}
+
+func (x *DeployRequest) GetLogFormat() string {
+	if x != nil {
+		return x.LogFormat
+	}
+	return ""
+}
+
+func (x *DeployRequest) GetNoColor() bool {
+	if x != nil {
+		return x.NoColor
+	}
+	return false
 }
 
 type DeployResponse struct {
@@ -986,7 +1010,7 @@ var File_zarf_v1_zarf_proto protoreflect.FileDescriptor
 
 const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\n" +
-	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xd8\x04\n" +
+	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xaf\x05\n" +
 	"\rDeployRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1e\n" +
 	"\n" +
@@ -1002,7 +1026,11 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\farchitecture\x18\n" +
 	" \x01(\tR\farchitecture\x12'\n" +
 	"\x0foci_concurrency\x18\v \x01(\x05R\x0eociConcurrency\x12&\n" +
-	"\x0fpublic_key_path\x18\f \x01(\tR\rpublicKeyPath\x1a?\n" +
+	"\x0fpublic_key_path\x18\f \x01(\tR\rpublicKeyPath\x12\x1b\n" +
+	"\tlog_level\x18\r \x01(\tR\blogLevel\x12\x1d\n" +
+	"\n" +
+	"log_format\x18\x0e \x01(\tR\tlogFormat\x12\x19\n" +
+	"\bno_color\x18\x0f \x01(\bR\anoColor\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd0\x01\n" +

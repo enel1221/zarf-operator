@@ -39,6 +39,9 @@ message DeployRequest {
     string architecture = 10;
     int32 oci_concurrency = 11;
     string public_key_path = 12;
+    string log_level = 13;
+    string log_format = 14;
+    bool no_color = 15;
 }
 
 message DeployResponse {

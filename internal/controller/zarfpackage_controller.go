@@ -220,6 +220,9 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 		Architecture:            zarfPkg.Spec.Architecture,
 		OCIConcurrency:          zarfPkg.Spec.OciConcurrency,
 		PublicKeyPath:           zarfPkg.Spec.Key,
+		LogLevel:                zarfPkg.Spec.LogLevel,
+		LogFormat:               zarfPkg.Spec.LogFormat,
+		NoColor:                 zarfPkg.Spec.NoColor,
 	}
 
 	result, err := r.ZarfClient.Deploy(ctx, opts)

@@ -50,6 +50,9 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		Architecture:            opts.Architecture,
 		OciConcurrency:          int32(opts.OCIConcurrency),
 		PublicKeyPath:           opts.PublicKeyPath,
+		LogLevel:                opts.LogLevel,
+		LogFormat:               opts.LogFormat,
+		NoColor:                 opts.NoColor,
 	}
 
 	resp, err := c.client.Deploy(ctx, req)

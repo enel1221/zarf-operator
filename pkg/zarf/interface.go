@@ -19,6 +19,9 @@ type DeployOptions struct {
 	Architecture            string
 	OCIConcurrency          int
 	PublicKeyPath           string
+	LogLevel                string
+	LogFormat               string
+	NoColor                 bool
 }
 
 // DeployResult contains the result of a deployment
