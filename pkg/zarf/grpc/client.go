@@ -53,9 +53,9 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		LogLevel:                opts.LogLevel,
 		LogFormat:               opts.LogFormat,
 		NoColor:                 opts.NoColor,
-		PlainHttp:				 opts.PlainHTTP,
+		PlainHttp:               opts.PlainHTTP,
 		InsecureSkipTlsVerify:   opts.InsecureSkipTLSVerify,
-		SkipVersionCheck: 		 opts.SkipVersionCheck,
+		SkipVersionCheck:        opts.SkipVersionCheck,
 	}
 
 	resp, err := c.client.Deploy(ctx, req)

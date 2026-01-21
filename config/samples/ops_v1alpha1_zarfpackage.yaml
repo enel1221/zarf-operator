@@ -7,27 +7,31 @@ metadata:
   name: zarfpackage-sample
 spec:
   # Source is the OCI reference to the Zarf package
-  source: "oci://ghcr.io/zarf-dev/packages/dos-games:1.2.0"
-  
+  source: "oci://ghcr.io/enel1221/podinfo-flux/podinfo-flux:1.0.0"
+
   # Optional: List of components to deploy (if empty, deploys all required components)
-  # components:
-  #   - dos-games
-  
+  components:
+    - flux
+    # - podinfo-via-flux-git
+    # - podinfo-via-flux-helm
+    - podinfo-via-flux-helm-oci
+    # - podinfo-via-flux-oci
+
   # Optional: Namespace override for the deployment
   # namespace: "games"
-  
+
   # Optional: Timeout for Helm operations (default: 15m)
-  timeout: "15m"
-  
+  # timeout: "15m"
+
   # Optional: Number of retries for operations
-  retries: 3
-  
+  # retries: 3
+
   # Optional: Set package variables
   # set:
   #   - "GAME_SPEED=fast"
-  
+
   # Optional: Skip signature validation
-  # skipSignatureValidation: false
-  
+  skipSignatureValidation: true
+
   # Optional: Adopt existing resources into Helm management
   # adoptExistingResources: false

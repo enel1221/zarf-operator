@@ -103,7 +103,7 @@ spec:
           - --port=50051
         env:
           - name: ZARF_CACHE_PATH
-            value: "/tmp/zarf-cache"
+            value: "/tmp/cache"
         ports:
           - containerPort: 50051
             name: grpc
@@ -132,7 +132,7 @@ spec:
             memory: 256Mi
         volumeMounts:
           - name: zarf-cache
-            mountPath: /tmp/zarf-cache
+            mountPath: /tmp/cache
           - name: tmp
             mountPath: /tmp
       volumes:

@@ -25,7 +25,7 @@ type ZarfServer struct {
 	zarfv1.UnimplementedZarfServiceServer
 	baseLogger *slog.Logger
 	baseConfig logger.Config
-	version	   string
+	version    string
 	cachePath  string
 }
 
@@ -36,7 +36,7 @@ func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version st
 
 	cachePath := os.Getenv("ZARF_CACHE_PATH")
 	if cachePath == "" {
-		cachePath = "/cache"
+		cachePath = "/tmp/cache"
 	}
 
 	return &ZarfServer{
@@ -127,9 +127,9 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		PublicKeyPath:  req.PublicKeyPath,
 		Verify:         !req.SkipSignatureValidation,
 		OCIConcurrency: int(req.OciConcurrency),
-		Filter:			filters.Empty(),
+		Filter:         filters.Empty(),
 		LayersSelector: zoci.AllLayers,
-		CachePath: 		s.cachePath,
+		CachePath:      s.cachePath,
 	}
 	log.Debug("loading package", "source", req.Source, "architecture", req.Architecture)
 
@@ -142,16 +142,16 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 
 	// Deploy the package
 	deployOpts := packager.DeployOptions{
-		SetVariables:              req.SetVariables,
-		AdoptExistingResources:    req.AdoptExistingResources,
-		Timeout:                   req.Timeout.AsDuration(),
-		Retries:                   int(req.Retries),
-		NamespaceOverride:         req.NamespaceOverride,
-		OCIConcurrency:            int(req.OciConcurrency),
-		IsInteractive:  		   false,
-		SkipVersionCheck: 		   req.SkipVersionCheck,
-		RemoteOptions:			   packager.RemoteOptions{
-			PlainHTTP: 			   req.PlainHttp,
+		SetVariables:           req.SetVariables,
+		AdoptExistingResources: req.AdoptExistingResources,
+		Timeout:                req.Timeout.AsDuration(),
+		Retries:                int(req.Retries),
+		NamespaceOverride:      req.NamespaceOverride,
+		OCIConcurrency:         int(req.OciConcurrency),
+		IsInteractive:          false,
+		SkipVersionCheck:       req.SkipVersionCheck,
+		RemoteOptions: packager.RemoteOptions{
+			PlainHTTP:             req.PlainHttp,
 			InsecureSkipTLSVerify: req.InsecureSkipTlsVerify,
 		},
 	}
@@ -265,10 +265,10 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 
 	// Build remove options
 	removeOpts := packager.RemoveOptions{
-		Cluster:			c,
-		Timeout:  			timeout,
-		NamespaceOverride:  req.NamespaceOverride,
-		SkipVersionCheck:	req.SkipVersionCheck,
+		Cluster:           c,
+		Timeout:           timeout,
+		NamespaceOverride: req.NamespaceOverride,
+		SkipVersionCheck:  req.SkipVersionCheck,
 	}
 
 	// Perform removal

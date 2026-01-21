@@ -22,9 +22,9 @@ type DeployOptions struct {
 	LogLevel                string
 	LogFormat               string
 	NoColor                 bool
-	PlainHTTP				bool
-	InsecureSkipTLSVerify	bool
-	SkipVersionCheck		bool
+	PlainHTTP               bool
+	InsecureSkipTLSVerify   bool
+	SkipVersionCheck        bool
 }
 
 // DeployResult contains the result of a deployment
@@ -82,7 +82,7 @@ type PackageInfo struct {
 type RemoveOptions struct {
 	PackageName       string
 	Components        []string
-	Timeout		      time.Duration
+	Timeout           time.Duration
 	NamespaceOverride string
 	SkipVersionCheck  bool
 }

@@ -119,6 +119,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 run-sidecar: fmt vet ## Run the sidecar from your host.
 	go run ./cmd/sidecar/main.go
 
+.PHONY: run-local
+run-local: manifests generate fmt vet ## Run both controller and sidecar locally (sidecar in background).
+	@echo "Starting sidecar in background..."
+	@go run ./cmd/sidecar/main.go &
+	@sleep 2
+	@echo "Starting controller..."
+	go run ./cmd/main.go
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/

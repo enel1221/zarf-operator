@@ -46,13 +46,14 @@ const (
 
 // Condition reasons
 const (
-	ReasonDeploying      = "Deploying"
-	ReasonDeployed       = "Deployed"
-	ReasonDeployFailed   = "DeployFailed"
-	ReasonRemoving       = "Removing"
-	ReasonRemoveFailed   = "RemoveFailed"
-	ReasonSourceNotFound = "SourceNotFound"
-	ReasonReconciling    = "Reconciling"
+	ReasonDeploying          = "Deploying"
+	ReasonDeployed           = "Deployed"
+	ReasonDeployFailed       = "DeployFailed"
+	ReasonRemoving           = "Removing"
+	ReasonRemoveFailed       = "RemoveFailed"
+	ReasonSourceNotFound     = "SourceNotFound"
+	ReasonReconciling        = "Reconciling"
+	ReasonSidecarUnavailable = "SidecarUnavailable"
 )
 
 // Error definitions
@@ -148,6 +149,15 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) (ctrl.Result, error) {
+	// Ensure client is available
+	if r.ZarfClient == nil {
+		log.Info("zarf sidecar not available, requeueing")
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+			ReasonSidecarUnavailable, "Zarf sidecar is not available - ensure sidecar is running")
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	// Check current deployment state
 	deployedPkg, err := r.ZarfClient.GetDeployedPackage(ctx, zarfPkg.Status.PackageName)
 	if err != nil {
@@ -192,6 +202,15 @@ func (r *ZarfPackageReconciler) needsDeploy(zarfPkg *opsv1alpha1.ZarfPackage, de
 }
 
 func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) (ctrl.Result, error) {
+	// Ensure client is available
+	if r.ZarfClient == nil {
+		log.Info("zarf sidecar not available for deployment, requeueing")
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+			ReasonSidecarUnavailable, "Cannot deploy: Zarf sidecar is not available")
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	log.Info("deploying package", "source", zarfPkg.Spec.Source)
 
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
