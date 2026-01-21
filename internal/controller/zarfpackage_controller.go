@@ -34,6 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/storage/driver"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+
 	opsv1alpha1 "github.com/enel1221/zarf-operator/api/v1alpha1"
 	"github.com/enel1221/zarf-operator/pkg/zarf"
 )
@@ -53,6 +57,8 @@ const (
 	ReasonRemoveFailed       = "RemoveFailed"
 	ReasonSourceNotFound     = "SourceNotFound"
 	ReasonReconciling        = "Reconciling"
+	ReasonDriftDetected      = "DriftDetected"
+	ReasonDriftResolved      = "DriftResolved"
 	ReasonSidecarUnavailable = "SidecarUnavailable"
 )
 
@@ -165,7 +171,7 @@ func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, 
 	}
 
 	// Determine if we need to deploy or update
-	needsDeploy := r.needsDeploy(zarfPkg, deployedPkg)
+	needsDeploy := r.needsDeploy(ctx, zarfPkg, deployedPkg)
 
 	if needsDeploy {
 		return r.deploy(ctx, log, zarfPkg)
@@ -180,14 +186,9 @@ func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, 
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
 }
 
-func (r *ZarfPackageReconciler) needsDeploy(zarfPkg *opsv1alpha1.ZarfPackage, deployedPkg *zarf.PackageInfo) bool {
+func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1alpha1.ZarfPackage, deployedPkg *zarf.PackageInfo) bool {
 	// Not deployed yet
 	if deployedPkg == nil {
-		return true
-	}
-
-	// Spec changed
-	if zarfPkg.Generation != zarfPkg.Status.ObservedGeneration {
 		return true
 	}
 
@@ -198,7 +199,99 @@ func (r *ZarfPackageReconciler) needsDeploy(zarfPkg *opsv1alpha1.ZarfPackage, de
 		}
 	}
 
+	// Check if deployment-affecting fields changed (not syncPolicy, logLevel, etc.)
+	if r.deploymentSpecChanged(zarfPkg) {
+		return true
+	}
+
+	// Check for drift if SyncPolicy is Detect or Remediate
+	if zarfPkg.Spec.SyncPolicy == opsv1alpha1.SyncPolicyDetect || zarfPkg.Spec.SyncPolicy == opsv1alpha1.SyncPolicyRemediate {
+		driftDetected, missingReleases := r.checkHelmDrift(ctx, deployedPkg)
+		if driftDetected {
+			zarfPkg.Status.DriftInfo = &opsv1alpha1.DriftInfo{
+				Detected:        true,
+				LastCheckTime:   metav1.Now(),
+				MissingReleases: missingReleases,
+				Message:         fmt.Sprintf("Missing Helm releases: %v", missingReleases),
+			}
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionTrue,
+				ReasonDriftDetected, fmt.Sprintf("Drift detected: %d missing releases", len(missingReleases)))
+
+			if zarfPkg.Spec.SyncPolicy == opsv1alpha1.SyncPolicyRemediate {
+				return true // Trigger redeploy
+			}
+		} else if zarfPkg.Status.DriftInfo != nil && zarfPkg.Status.DriftInfo.Detected {
+			// Clear drift if no longer detected
+			zarfPkg.Status.DriftInfo = nil
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionFalse,
+				ReasonDriftResolved, "No drift detected")
+		}
+	}
 	return false
+}
+
+func (r *ZarfPackageReconciler) deploymentSpecChanged(zarfPkg *opsv1alpha1.ZarfPackage) bool {
+	if zarfPkg.Status.DeployedSpecHash == "" {
+		return true
+	}
+	return zarfPkg.Spec.DeploymentHash() != zarfPkg.Status.DeployedSpecHash
+}
+
+func (r *ZarfPackageReconciler) checkHelmDrift(ctx context.Context, deployedPkg *zarf.PackageInfo) (bool, []string) {
+	if deployedPkg == nil {
+		return false, nil
+	}
+
+	var missingReleases []string
+	for _, comp := range deployedPkg.DeployedComponents {
+		for _, chart := range comp.InstalledCharts {
+			exists, _ := r.helmReleaseExists(ctx, chart.ChartName, chart.Namespace)
+			if !exists {
+				missingReleases = append(missingReleases, fmt.Sprintf("%s/%s", chart.Namespace, chart.ChartName))
+			}
+		}
+	}
+	return len(missingReleases) > 0, missingReleases
+}
+
+func (r *ZarfPackageReconciler) helmReleaseExists(ctx context.Context, releaseName, namespace string) (bool, error) {
+	// Add timeout to prevent blocking the controller (following ESO pattern)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// Create Helm action configuration using CLI flags for REST client getter
+	actionConfig := new(action.Configuration)
+
+	// Use ConfigFlags as RESTClientGetter - this uses in-cluster config automatically
+	configFlags := genericclioptions.NewConfigFlags(true)
+	configFlags.Namespace = &namespace
+
+	if err := actionConfig.Init(
+		configFlags,
+		namespace,
+		"secret",                                 // Helm stores releases in secrets by default
+		func(format string, v ...interface{}) {}, // Silent logger
+	); err != nil {
+		return false, fmt.Errorf("failed to init helm action config: %w", err)
+	}
+
+	// Use History action to check if release exists
+	historyClient := action.NewHistory(actionConfig)
+	historyClient.Max = 1 // We only need to know if it exists
+
+	_, err := historyClient.Run(releaseName)
+	if err != nil {
+		if err == driver.ErrReleaseNotFound {
+			return false, nil
+		}
+		// Check for context timeout
+		if ctx.Err() != nil {
+			return false, fmt.Errorf("helm release check timed out: %w", ctx.Err())
+		}
+		return false, fmt.Errorf("failed to get release history: %w", err)
+	}
+
+	return true, nil
 }
 
 func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) (ctrl.Result, error) {
@@ -263,7 +356,12 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 	zarfPkg.Status.Source = zarfPkg.Spec.Source
 	zarfPkg.Status.ComponentStatuses = r.convertComponentStatuses(result.DeployedComponents)
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+	zarfPkg.Status.DeployedSpecHash = zarfPkg.Spec.DeploymentHash()
 
+	// Clear drift info after successful deploy (drift has been remediated)
+	zarfPkg.Status.DriftInfo = nil
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionFalse,
+		ReasonDriftResolved, "No drift detected")
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 		ReasonDeployed, "Package deployed successfully")
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionFalse,

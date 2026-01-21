@@ -9,6 +9,8 @@ spec:
   # Source is the OCI reference to the Zarf package
   source: "oci://ghcr.io/enel1221/podinfo-flux/podinfo-flux:1.0.0"
 
+  # Optional: Sync policy for the package Default=Ignore (Ignore, Detect, Remediate)
+  syncPolicy: Detect
   # Optional: List of components to deploy (if empty, deploys all required components)
   components:
     - flux

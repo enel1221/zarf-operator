@@ -125,6 +125,23 @@ spec:
               source:
                 description: Source is the location of the Zarf package OCI
                 type: string
+              syncPolicy:
+                allOf:
+                - enum:
+                  - Ignore
+                  - Detect
+                  - Remediate
+                - enum:
+                  - Ignore
+                  - Detect
+                  - Remediate
+                default: Ignore
+                description: |-
+                  SyncPolicy defines how the operator handles drift between desired and actual state.
+                  Ignore: Do not check for drift (default)
+                  Detect: Check for drift and report in status, but do not remediate
+                  Remediate: Check for drift and automatically redeploy to fix it
+                type: string
               timeout:
                 description: Timeout is the maximum duration to wait for the Zarf
                   package deployment.
@@ -216,9 +233,37 @@ spec:
               deployedGeneration:
                 description: DeployedGeneration is the Zarf deployment generation
                 type: integer
+              deployedSpecHash:
+                description: |-
+                  DeployedSpecHash is the hash of deployment-affecting spec fields
+                  Used to detect when a redeployment is needed (follows Flux's lastAttemptedConfigDigest pattern)
+                type: string
               deployedVersion:
                 description: DeployedVersion is the version of the deployed package
                 type: string
+              driftInfo:
+                description: DriftInfo contains details about detected drift (when
+                  SyncPolicy is Detect or Remedeiate)
+                properties:
+                  detected:
+                    description: Detected indicates whether drift was detected
+                    type: boolean
+                  lastCheckTime:
+                    description: LastCheckTime is when drift was last checked
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message provides human-readable drift details
+                    type: string
+                  missingReleases:
+                    description: MissingReleases lists Helm releases that should exist
+                      but don't
+                    items:
+                      type: string
+                    type: array
+                required:
+                - detected
+                type: object
               lastReconcileTime:
                 description: LastReconcileTime is when the package was last reconciled
                 format: date-time

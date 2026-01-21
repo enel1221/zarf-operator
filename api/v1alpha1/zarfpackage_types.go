@@ -17,11 +17,42 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// deploymentAffectingSpec contains only the fields that require redeployment when changed
+type deploymentAffectingSpec struct {
+	Source                 string   `json:"source"`
+	Components             []string `json:"components,omitempty"`
+	Namespace              string   `json:"namespace,omitempty"`
+	Set                    []string `json:"set,omitempty"`
+	Shasum                 string   `json:"shasum,omitempty"`
+	Features               []string `json:"features,omitempty"`
+	Architecture           string   `json:"architecture,omitempty"`
+	AdoptExistingResources bool     `json:"adoptExistingResources,omitempty"`
+}
+
+// DeploymentHash returns a SHA256 hash of the deployment-affecting spec fields.
+// This follows the Flux pattern (lastAttemptedConfigDigest) for detecting meaningful spec changes.
+func (s *ZarfPackageSpec) DeploymentHash() string {
+	das := deploymentAffectingSpec{
+		Source:                 s.Source,
+		Components:             s.Components,
+		Namespace:              s.Namespace,
+		Set:                    s.Set,
+		Shasum:                 s.Shasum,
+		Features:               s.Features,
+		Architecture:           s.Architecture,
+		AdoptExistingResources: s.AdoptExistingResources,
+	}
+	data, _ := json.Marshal(das)
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", hash[:8]) // 16 hex chars, sufficient for comparison
+}
 
 // ZarfPackageSpec defines the desired state of ZarfPackage.
 type ZarfPackageSpec struct {
@@ -107,7 +138,31 @@ type ZarfPackageSpec struct {
 	// ZarfCache is the cache directory for the Zarf package.
 	// +optional
 	ZarfCache string `json:"zarfCache,omitempty"`
+
+	// SyncPolicy defines how the operator handles drift between desired and actual state.
+	// Ignore: Do not check for drift (default)
+	// Detect: Check for drift and report in status, but do not remediate
+	// Remediate: Check for drift and automatically redeploy to fix it
+	// +kubebuilder:validation:Enum=Ignore;Detect;Remediate
+	// +kubebuilder:default=Ignore
+	// +optional
+	SyncPolicy SyncPolicy `json:"syncPolicy,omitempty"`
 }
+
+// SyncPolicy defines how the operator handles drift between desired and actual state
+// +kubebuilder:validation:Enum=Ignore;Detect;Remediate
+type SyncPolicy string
+
+const (
+	// SyncPolicyIgnore does not check for drift (default behavior)
+	SyncPolicyIgnore SyncPolicy = "Ignore"
+
+	// SyncPolicyDetect checks for drift and reports it in status/conditions but does not remediate
+	SyncPolicyDetect SyncPolicy = "Detect"
+
+	// SyncPolicyRemediate checks for drift and automatically redeploys to fix it
+	SyncPolicyRemediate SyncPolicy = "Remediate"
+)
 
 // ZarfPackagePhase represents the phase of the ZarfPackage deployment
 // +kubebuilder:validation:Enum=Pending;Deploying;Deployed;Failed;Removing
@@ -160,6 +215,9 @@ const (
 
 	// ConditionTypeProgressing indicates deployment is in progress
 	ConditionTypeProgressing ZarfPackageConditionType = "Progressing"
+
+	// ConditionTypeDriftDetected indicates drift was detected between expected and actual state
+	ConditionTypeDriftDetected ZarfPackageConditionType = "DriftDetected"
 )
 
 // ZarfPackageCondition represents a condition of the ZarfPackage
@@ -213,6 +271,27 @@ type ZarfPackageStatus struct {
 
 	// PackageName is the name from the package metadata
 	PackageName string `json:"packageName,omitempty"`
+
+	// DriftInfo contains details about detected drift (when SyncPolicy is Detect or Remedeiate)
+	DriftInfo *DriftInfo `json:"driftInfo,omitempty"`
+
+	// DeployedSpecHash is the hash of deployment-affecting spec fields
+	// Used to detect when a redeployment is needed (follows Flux's lastAttemptedConfigDigest pattern)
+	DeployedSpecHash string `json:"deployedSpecHash,omitempty"`
+}
+
+type DriftInfo struct {
+	// Detected indicates whether drift was detected
+	Detected bool `json:"detected"`
+
+	// LastCheckTime is when drift was last checked
+	LastCheckTime metav1.Time `json:"lastCheckTime,omitempty"`
+
+	// MissingReleases lists Helm releases that should exist but don't
+	MissingReleases []string `json:"missingReleases,omitempty"`
+
+	// Message provides human-readable drift details
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true
