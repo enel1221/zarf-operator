@@ -139,7 +139,11 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		log.Error("failed to load package", "error", err, "source", req.Source)
 		return &zarfv1.DeployResponse{Error: fmt.Sprintf("failed to load package: %v", err)}, nil
 	}
-	defer pkgLayout.Cleanup()
+	defer func() {
+		if err := pkgLayout.Cleanup(); err != nil {
+			log.Error("failed to cleanup package", "error", err)
+		}
+	}()
 
 	// Apply component filter if components were specified
 	if len(req.Components) > 0 {
@@ -203,7 +207,12 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		})
 	}
 
-	log.Info("deployment completed", "package", pkgLayout.Pkg.Metadata.Name, "version", pkgLayout.Pkg.Metadata.Version, "components", len(components))
+	log.Info(
+		"deployment completed",
+		"package", pkgLayout.Pkg.Metadata.Name,
+		"version", pkgLayout.Pkg.Metadata.Version,
+		"components", len(components),
+	)
 
 	return &zarfv1.DeployResponse{
 		PackageName:        pkgLayout.Pkg.Metadata.Name,
@@ -213,7 +222,10 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	}, nil
 }
 
-func (s *ZarfServer) GetDeployedPackage(ctx context.Context, req *zarfv1.GetDeployedPackageRequest) (*zarfv1.GetDeployedPackageResponse, error) {
+func (s *ZarfServer) GetDeployedPackage(
+	ctx context.Context,
+	req *zarfv1.GetDeployedPackageRequest,
+) (*zarfv1.GetDeployedPackageResponse, error) {
 	log, ctx := s.baseLoggerWithContext(ctx)
 	log.Debug("get deployed package", "package", req.PackageName)
 
@@ -235,7 +247,10 @@ func (s *ZarfServer) GetDeployedPackage(ctx context.Context, req *zarfv1.GetDepl
 	}, nil
 }
 
-func (s *ZarfServer) ListDeployedPackages(ctx context.Context, req *zarfv1.ListDeployedPackagesRequest) (*zarfv1.ListDeployedPackagesResponse, error) {
+func (s *ZarfServer) ListDeployedPackages(
+	ctx context.Context,
+	req *zarfv1.ListDeployedPackagesRequest,
+) (*zarfv1.ListDeployedPackagesResponse, error) {
 	log, ctx := s.baseLoggerWithContext(ctx)
 	log.Debug("list deployed packages")
 
@@ -302,7 +317,10 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 	return &zarfv1.RemoveResponse{}, nil
 }
 
-func (s *ZarfServer) GetPackageMetadata(ctx context.Context, req *zarfv1.GetPackageMetadataRequest) (*zarfv1.GetPackageMetadataResponse, error) {
+func (s *ZarfServer) GetPackageMetadata(
+	ctx context.Context,
+	req *zarfv1.GetPackageMetadataRequest,
+) (*zarfv1.GetPackageMetadataResponse, error) {
 	log, ctx := s.baseLoggerWithContext(ctx)
 	log.Debug("get package metadata", "source", req.Source)
 
@@ -313,7 +331,11 @@ func (s *ZarfServer) GetPackageMetadata(ctx context.Context, req *zarfv1.GetPack
 		log.Error("failed to load package metadata", "error", err, "source", req.Source)
 		return &zarfv1.GetPackageMetadataResponse{Error: fmt.Sprintf("failed to load: %v", err)}, nil
 	}
-	defer pkgLayout.Cleanup()
+	defer func() {
+		if err := pkgLayout.Cleanup(); err != nil {
+			log.Error("failed to cleanup package", "error", err)
+		}
+	}()
 
 	components := make([]string, 0, len(pkgLayout.Pkg.Components))
 	for _, c := range pkgLayout.Pkg.Components {

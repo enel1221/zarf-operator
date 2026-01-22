@@ -1,0 +1,13 @@
+# Zarf-injected values - these override chart defaults during Zarf deployment
+# The ###ZARF_REGISTRY### prefix enables Zarf's image rewriting for air-gapped environments
+
+controllerManager:
+  container:
+    image:
+      repository: "###ZARF_REGISTRY###/###ZARF_CONST_OPERATOR_IMAGE###"
+      tag: "###ZARF_CONST_OPERATOR_IMAGE_TAG###"
+
+sidecar:
+  image:
+    repository: "###ZARF_REGISTRY###/###ZARF_CONST_SIDECAR_IMAGE###"
+    tag: "###ZARF_CONST_SIDECAR_IMAGE_TAG###"

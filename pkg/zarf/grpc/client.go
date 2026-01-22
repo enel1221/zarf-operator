@@ -21,9 +21,8 @@ type Client struct {
 
 // NewClient creates a new gRPC client
 func NewClient(ctx context.Context, address string) (*Client, error) {
-	conn, err := grpc.DialContext(ctx, address,
+	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to zarf sidecar: %w", err)

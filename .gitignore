@@ -27,3 +27,4 @@ go.work
 *~
 .zarf
 .eso
+*.tar.zst
