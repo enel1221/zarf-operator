@@ -1,0 +1,16 @@
+apiVersion: v2
+name: zarf-operator
+description: Kubernetes operator for deploying and managing Zarf packages
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/enel1221/zarf-operator
+sources:
+  - https://github.com/enel1221/zarf-operator
+maintainers:
+  - name: enel1221
+keywords:
+  - zarf
+  - kubernetes
+  - operator
+  - airgap

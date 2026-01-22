@@ -1,0 +1,22 @@
+kind: ZarfPackageConfig
+metadata:
+  name: zarf-operator
+  version: 0.1.0
+  description: Deploy Zarf Operator
+
+components:
+  - name: helm
+    description: Installs the Zarf Operator via Helm Chart
+    required: true
+    charts:
+      - name: zarf-operator
+        version: 0.1.0
+        namespace: zarf
+        localPath: chart
+        variables:
+          - name: REPLICA_COUNT
+            description: "Override the number of pod replicas"
+            path: controllerManager.replicas
+    images:
+      - ghcr.io/enel1221/zarf-operator:v0.1.0
+      - ghcr.io/enel1221/zarf-operator-sidecar:v0.1.0
