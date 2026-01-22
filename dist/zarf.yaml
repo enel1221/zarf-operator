@@ -1,8 +1,18 @@
 kind: ZarfPackageConfig
 metadata:
   name: zarf-operator
-  version: 0.1.0
+  version: "###ZARF_PKG_TMPL_VERSION###"
   description: Deploy Zarf Operator
+
+constants:
+  - name: OPERATOR_IMAGE
+    value: "###ZARF_PKG_TMPL_OPERATOR_IMAGE###"
+  - name: OPERATOR_IMAGE_TAG
+    value: "###ZARF_PKG_TMPL_OPERATOR_IMAGE_TAG###"
+  - name: SIDECAR_IMAGE
+    value: "###ZARF_PKG_TMPL_SIDECAR_IMAGE###"
+  - name: SIDECAR_IMAGE_TAG
+    value: "###ZARF_PKG_TMPL_SIDECAR_IMAGE_TAG###"
 
 components:
   - name: helm
@@ -10,13 +20,15 @@ components:
     required: true
     charts:
       - name: zarf-operator
-        version: 0.1.0
+        version: "###ZARF_PKG_TMPL_VERSION###"
         namespace: zarf
         localPath: chart
+        valuesFiles:
+          - zarf-values.yaml
         variables:
           - name: REPLICA_COUNT
             description: "Override the number of pod replicas"
             path: controllerManager.replicas
     images:
-      - ghcr.io/enel1221/zarf-operator:v0.1.0
-      - ghcr.io/enel1221/zarf-operator-sidecar:v0.1.0
+      - "###ZARF_PKG_TMPL_OPERATOR_IMAGE###:###ZARF_PKG_TMPL_OPERATOR_IMAGE_TAG###"
+      - "###ZARF_PKG_TMPL_SIDECAR_IMAGE###:###ZARF_PKG_TMPL_SIDECAR_IMAGE_TAG###"

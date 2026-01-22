@@ -3,12 +3,13 @@ controllerManager:
   replicas: 1
   container:
     image:
-      repository: controller
-      tag: latest
+      repository: ghcr.io/enel1221/zarf-operator
+      tag: main
     args:
       - "--leader-elect"
       - "--metrics-bind-address=:8443"
       - "--health-probe-bind-address=:8081"
+      - "--zarf-sidecar-address=localhost:50051"
     resources:
       limits:
         cpu: 500m
@@ -80,7 +81,7 @@ sidecar:
   enabled: true
   image:
     repository: ghcr.io/enel1221/zarf-operator-sidecar
-    tag: v0.1.0
+    tag: main
   port: 50051
   cachePath: /tmp/cache
   resources:
