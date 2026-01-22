@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -139,6 +140,20 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		return &zarfv1.DeployResponse{Error: fmt.Sprintf("failed to load package: %v", err)}, nil
 	}
 	defer pkgLayout.Cleanup()
+
+	// Apply component filter if components were specified
+	if len(req.Components) > 0 {
+		componentFilter := filters.Combine(
+			filters.ByLocalOS(runtime.GOOS),
+			filters.ForDeploy(strings.Join(req.Components, ","), false),
+		)
+		pkgLayout.Pkg.Components, err = componentFilter.Apply(pkgLayout.Pkg)
+		if err != nil {
+			log.Error("failed to filter components", "error", err, "components", req.Components)
+			return &zarfv1.DeployResponse{Error: fmt.Sprintf("failed to filter components: %v", err)}, nil
+		}
+		log.Info("filtered components", "requested", req.Components, "selected", len(pkgLayout.Pkg.Components))
+	}
 
 	// Deploy the package
 	deployOpts := packager.DeployOptions{
