@@ -335,6 +335,7 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 		LogLevel:                zarfPkg.Spec.LogLevel,
 		LogFormat:               zarfPkg.Spec.LogFormat,
 		NoColor:                 zarfPkg.Spec.NoColor,
+		YoloMode:                zarfPkg.Spec.Yolo,
 	}
 
 	result, err := r.ZarfClient.Deploy(ctx, opts)

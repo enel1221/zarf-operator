@@ -147,6 +147,12 @@ type ZarfPackageSpec struct {
 	// +kubebuilder:default=Ignore
 	// +optional
 	SyncPolicy SyncPolicy `json:"syncPolicy,omitempty"`
+
+	// Yolo enables YOLO mode - deploy without requiring 'zarf init'.
+	// Images are pulled directly from upstream registries instead of the internal Zarf registry.
+	// Only use in connected environments where upstream registries are accessible.
+	// +optional
+	Yolo bool `json:"yolo,omitempty"`
 }
 
 // SyncPolicy defines how the operator handles drift between desired and actual state

@@ -155,6 +155,12 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		log.Info("filtered components", "requested", req.Components, "selected", len(pkgLayout.Pkg.Components))
 	}
 
+	// Handle YOLO mode - deploy without zarf init, pull images from upstream
+	if req.YoloMode {
+		pkgLayout.Pkg.Metadata.YOLO = true
+		log.Info("YOLO mode enabled - deploying without zarf init")
+	}
+
 	// Deploy the package
 	deployOpts := packager.DeployOptions{
 		SetVariables:           req.SetVariables,

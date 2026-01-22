@@ -45,6 +45,7 @@ message DeployRequest {
     bool plain_http = 16;
     bool insecure_skip_tls_verify = 17;
     bool skip_version_check = 18;
+    bool yolo_mode = 19;
 }
 
 message DeployResponse {

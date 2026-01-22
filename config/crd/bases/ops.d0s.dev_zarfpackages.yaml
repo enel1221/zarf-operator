@@ -149,6 +149,12 @@ spec:
               tmpdir:
                 description: Tmpdir is the temporary directory for the Zarf package.
                 type: string
+              yolo:
+                description: |-
+                  Yolo enables YOLO mode - deploy without requiring 'zarf init'.
+                  Images are pulled directly from upstream registries instead of the internal Zarf registry.
+                  Only use in connected environments where upstream registries are accessible.
+                type: boolean
               zarfCache:
                 description: ZarfCache is the cache directory for the Zarf package.
                 type: string

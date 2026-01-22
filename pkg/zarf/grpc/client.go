@@ -56,6 +56,7 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		PlainHttp:               opts.PlainHTTP,
 		InsecureSkipTlsVerify:   opts.InsecureSkipTLSVerify,
 		SkipVersionCheck:        opts.SkipVersionCheck,
+		YoloMode:                opts.YoloMode,
 	}
 
 	resp, err := c.client.Deploy(ctx, req)

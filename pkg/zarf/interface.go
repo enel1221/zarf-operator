@@ -25,6 +25,7 @@ type DeployOptions struct {
 	PlainHTTP               bool
 	InsecureSkipTLSVerify   bool
 	SkipVersionCheck        bool
+	YoloMode                bool
 }
 
 // DeployResult contains the result of a deployment
