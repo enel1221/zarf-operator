@@ -6,9 +6,9 @@
 VERSION = "0.1.0"
 
 # Operator image configuration
-OPERATOR_IMAGE = "ghcr.io/enel1221/zarf-operator"
+OPERATOR_IMAGE = "enel1221/zarf-operator"
 OPERATOR_IMAGE_TAG = "main"
 
 # Sidecar image configuration
-SIDECAR_IMAGE = "ghcr.io/enel1221/zarf-operator-sidecar"
+SIDECAR_IMAGE = "enel1221/zarf-operator-sidecar"
 SIDECAR_IMAGE_TAG = "main"

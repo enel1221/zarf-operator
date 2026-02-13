@@ -30,5 +30,5 @@ components:
             description: "Override the number of pod replicas"
             path: controllerManager.replicas
     images:
-      - "###ZARF_PKG_TMPL_OPERATOR_IMAGE###:###ZARF_PKG_TMPL_OPERATOR_IMAGE_TAG###"
-      - "###ZARF_PKG_TMPL_SIDECAR_IMAGE###:###ZARF_PKG_TMPL_SIDECAR_IMAGE_TAG###"
+      - "ghcr.io/enel1221/zarf-operator:###ZARF_PKG_TMPL_OPERATOR_IMAGE_TAG###"
+      - "ghcr.io/enel1221/zarf-operator-sidecar:###ZARF_PKG_TMPL_SIDECAR_IMAGE_TAG###"
