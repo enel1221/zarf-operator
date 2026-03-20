@@ -2,7 +2,7 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: d0s.dev
+domain: zarf.dev
 layout:
 - go.kubebuilder.io/v4
 plugins:
@@ -14,8 +14,8 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: d0s.dev
-  group: ops
+  domain: zarf.dev
+  group: ""
   kind: ZarfPackage
   path: github.com/enel1221/zarf-operator/api/v1alpha1
   version: v1alpha1

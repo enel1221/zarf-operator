@@ -23,7 +23,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - ops.d0s.dev
+  - zarf.dev
   resources:
   - zarfpackages
   verbs:
@@ -35,13 +35,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - ops.d0s.dev
+  - zarf.dev
   resources:
   - zarfpackages/finalizers
   verbs:
   - update
 - apiGroups:
-  - ops.d0s.dev
+  - zarf.dev
   resources:
   - zarfpackages/status
   verbs:

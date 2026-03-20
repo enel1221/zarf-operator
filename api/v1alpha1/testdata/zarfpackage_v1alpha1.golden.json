@@ -1,5 +1,5 @@
 {
-  "apiVersion": "ops.d0s.dev/v1alpha1",
+  "apiVersion": "zarf.dev/v1alpha1",
   "kind": "ZarfPackage",
   "metadata": {
     "name": "golden-test",

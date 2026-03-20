@@ -52,7 +52,7 @@ import (
 
 // Finalizer
 const (
-	ZarfPackageFinalizer = "zarfpackage.ops.d0s.dev/finalizer"
+	ZarfPackageFinalizer = "zarfpackage.zarf.dev/finalizer"
 	DefaultRequeueAfter  = 5 * time.Minute
 	backoffBaseInterval  = 10 * time.Second
 	backoffMaxInterval   = 5 * time.Minute
@@ -94,9 +94,9 @@ type ZarfPackageReconciler struct {
 	helmReleaseExistsFn func(ctx context.Context, releaseName, namespace string) (bool, error)
 }
 
-// +kubebuilder:rbac:groups=ops.d0s.dev,resources=zarfpackages,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=ops.d0s.dev,resources=zarfpackages/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=ops.d0s.dev,resources=zarfpackages/finalizers,verbs=update
+// +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 

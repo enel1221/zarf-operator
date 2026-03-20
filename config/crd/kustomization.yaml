@@ -2,7 +2,7 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/ops.d0s.dev_zarfpackages.yaml
+- bases/zarf.dev_zarfpackages.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

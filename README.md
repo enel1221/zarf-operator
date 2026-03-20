@@ -40,7 +40,7 @@ zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:0.1.0-amd64
 ### Create a ZarfPackage
 
 ```yaml
-apiVersion: ops.d0s.dev/v1alpha1
+apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: my-package

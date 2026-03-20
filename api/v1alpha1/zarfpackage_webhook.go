@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// +kubebuilder:webhook:path=/mutate-ops-d0s-dev-v1alpha1-zarfpackage,mutating=true,failurePolicy=fail,sideEffects=None,groups=ops.d0s.dev,resources=zarfpackages,verbs=create;update,versions=v1alpha1,name=mzarfpackage-v1alpha1.kb.io,admissionReviewVersions=v1
-// +kubebuilder:webhook:path=/validate-ops-d0s-dev-v1alpha1-zarfpackage,mutating=false,failurePolicy=fail,sideEffects=None,groups=ops.d0s.dev,resources=zarfpackages,verbs=create;update,versions=v1alpha1,name=vzarfpackage-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-zarf-dev-v1alpha1-zarfpackage,mutating=true,failurePolicy=fail,sideEffects=None,groups=zarf.dev,resources=zarfpackages,verbs=create;update,versions=v1alpha1,name=mzarfpackage-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-zarf-dev-v1alpha1-zarfpackage,mutating=false,failurePolicy=fail,sideEffects=None,groups=zarf.dev,resources=zarfpackages,verbs=create;update,versions=v1alpha1,name=vzarfpackage-v1alpha1.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &zarfPackageCustomDefaulter{}
 var _ webhook.CustomValidator = &zarfPackageCustomValidator{}

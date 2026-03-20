@@ -265,7 +265,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 		It("should deploy a Zarf package from an OCI registry", func() {
 			By("applying a ZarfPackage CR pointing to the in-cluster registry")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -376,7 +376,7 @@ spec:
 
 		It("should deploy a Zarf package with specific components", func() {
 			By("applying a ZarfPackage CR with component selection")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -428,7 +428,7 @@ spec:
 
 		It("should handle suspend and resume", func() {
 			By("applying a ZarfPackage CR")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -495,7 +495,7 @@ spec:
 
 		It("should set Failed phase for an invalid OCI source", func() {
 			By("applying a ZarfPackage CR with an invalid source")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -548,7 +548,7 @@ spec:
 
 		It("should add and remove the finalizer during lifecycle", func() {
 			By("applying a ZarfPackage CR")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -572,7 +572,7 @@ spec:
 					"-o", "jsonpath={.metadata.finalizers}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("zarfpackage.ops.d0s.dev/finalizer"))
+				g.Expect(output).To(ContainSubstring("zarfpackage.zarf.dev/finalizer"))
 			}
 			Eventually(verifyFinalizer, 60*time.Second).Should(Succeed())
 
@@ -608,7 +608,7 @@ spec:
 		It("should expose controller-runtime reconciliation metrics", func() {
 			By("creating a short-lived ZarfPackage CR to trigger reconciliation")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = utils.StringReader(fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			cmd.Stdin = utils.StringReader(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: metrics-test-pkg
@@ -733,7 +733,7 @@ spec:
 			}
 
 			By("applying a ZarfPackage CR")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -848,7 +848,7 @@ spec:
 			}
 
 			By(fmt.Sprintf("applying ZarfPackage %s", zarfPkgName))
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s
@@ -925,7 +925,7 @@ spec:
 			const zarfPkgName = "e2e-httpbin-update"
 
 			By("applying a ZarfPackage CR with REPLICAS=1")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
   name: %s

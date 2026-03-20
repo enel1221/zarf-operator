@@ -15,10 +15,10 @@ webhooks:
       service:
         namespace: {{ .Release.Namespace }}
         name: {{ include "chart.name" . }}-webhook-service
-        path: /validate-ops-d0s-dev-v1alpha1-zarfpackage
+        path: /validate-zarf-dev-v1alpha1-zarfpackage
     rules:
       - apiGroups:
-          - ops.d0s.dev
+          - zarf.dev
         apiVersions:
           - v1alpha1
         operations:

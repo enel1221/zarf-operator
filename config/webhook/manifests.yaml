@@ -10,12 +10,12 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /mutate-ops-d0s-dev-v1alpha1-zarfpackage
+      path: /mutate-zarf-dev-v1alpha1-zarfpackage
   failurePolicy: Fail
   name: mzarfpackage-v1alpha1.kb.io
   rules:
   - apiGroups:
-    - ops.d0s.dev
+    - zarf.dev
     apiVersions:
     - v1alpha1
     operations:
@@ -36,12 +36,12 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-ops-d0s-dev-v1alpha1-zarfpackage
+      path: /validate-zarf-dev-v1alpha1-zarfpackage
   failurePolicy: Fail
   name: vzarfpackage-v1alpha1.kb.io
   rules:
   - apiGroups:
-    - ops.d0s.dev
+    - zarf.dev
     apiVersions:
     - v1alpha1
     operations:
