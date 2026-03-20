@@ -72,6 +72,10 @@ prometheus:
 certmanager:
   enable: false
 
+# [WEBHOOK]: To enable mutating/validating admission webhooks set true
+webhook:
+  enable: false
+
 # [NETWORK POLICIES]: To enable NetworkPolicies set true
 networkPolicy:
   enable: false
@@ -84,15 +88,22 @@ sidecar:
     tag: main
   port: 50051
   cachePath: /tmp/cache
+  cache:
+    sizeLimit: 10Gi
   resources:
     limits:
-      cpu: 500m
-      memory: 512Mi
+      cpu: 1000m
+      memory: 1Gi
     requests:
-      cpu: 50m
-      memory: 128Mi
+      cpu: 100m
+      memory: 256Mi
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:
       drop:
         - "ALL"
+
+# [PDB]: PodDisruptionBudget (only effective when replicas > 1)
+pdb:
+  enable: true
+  minAvailable: 1

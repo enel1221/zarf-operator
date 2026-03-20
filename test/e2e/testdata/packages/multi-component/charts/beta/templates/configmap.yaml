@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: beta-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: beta
+data:
+  component: "beta"
+  label: {{ .Values.label | quote }}

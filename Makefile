@@ -77,21 +77,80 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
+
+# E2E test cluster settings
+E2E_KIND_CLUSTER ?= zarf-operator-e2e
+E2E_REGISTRY_NODEPORT ?= 30500
+E2E_REGISTRY_HOST_PORT ?= 5001
+E2E_IMG ?= example.com/zarf-operator:v0.0.1
+E2E_SIDECAR_IMG ?= example.com/zarf-operator-sidecar:v0.0.1
+
+# All test package directories
+E2E_PKG_DIRS := test/e2e/testdata/packages/nginx \
+	test/e2e/testdata/packages/multi-component \
+	test/e2e/testdata/packages/httpbin
+
+.PHONY: e2e-setup
+e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
+	@echo "Creating Kind cluster '$(E2E_KIND_CLUSTER)'..."
+	$(KIND) create cluster --name $(E2E_KIND_CLUSTER) --config test/e2e/kind-config.yaml --wait 60s
+	@echo "Loading operator images into Kind..."
+	$(KIND) load docker-image $(IMG) --name $(E2E_KIND_CLUSTER)
+	$(KIND) load docker-image $(SIDECAR_IMG) --name $(E2E_KIND_CLUSTER)
+	@echo "Loading registry:2 image into Kind..."
+	$(CONTAINER_TOOL) pull registry:2
+	$(KIND) load docker-image registry:2 --name $(E2E_KIND_CLUSTER)
+	@echo "Deploying in-cluster OCI registry..."
+	$(KUBECTL) apply -f test/e2e/testdata/registry.yaml
+	$(KUBECTL) wait --for=condition=available deployment/registry -n e2e-registry --timeout=120s
+	$(MAKE) e2e-publish-packages
+	@echo "E2E cluster setup complete."
+
+.PHONY: e2e-publish-packages
+e2e-publish-packages: ## Build and publish all test Zarf packages to the in-cluster registry.
+	@for pkg_dir in $(E2E_PKG_DIRS); do \
+		pkg_name=$$(grep 'name:' $$pkg_dir/zarf.yaml | head -1 | awk '{print $$2}'); \
+		echo "Building Zarf package from $$pkg_dir ($$pkg_name)..."; \
+		cd $$pkg_dir && zarf package create . --confirm --output /tmp/zarf-e2e-pkg/ && cd -; \
+		echo "Publishing $$pkg_name to in-cluster registry..."; \
+		zarf package publish $$(ls /tmp/zarf-e2e-pkg/zarf-package-$$pkg_name-*.tar.zst) oci://localhost:$(E2E_REGISTRY_HOST_PORT) --plain-http; \
+		rm -rf /tmp/zarf-e2e-pkg/; \
+	done
+
+.PHONY: e2e-teardown
+e2e-teardown: ## Tear down the e2e Kind cluster.
+	$(KIND) delete cluster --name $(E2E_KIND_CLUSTER) || true
+
 .PHONY: test-e2e
-test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: manifests generate fmt vet ## Run e2e tests against existing cluster (no teardown).
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	@$(KIND) get clusters | grep -q 'kind' || { \
-		echo "No Kind cluster is running. Please start a Kind cluster before running the e2e tests."; \
+	KIND_CLUSTER=$(E2E_KIND_CLUSTER) CERT_MANAGER_INSTALL_SKIP=true go test ./test/e2e/ -v -ginkgo.v -timeout 20m
+
+.PHONY: test-e2e-fresh
+test-e2e-fresh: manifests generate fmt vet ## Full cluster teardown, rebuild images, and run e2e tests.
+	@command -v $(KIND) >/dev/null 2>&1 || { \
+		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	go test ./test/e2e/ -v -ginkgo.v
+	$(MAKE) e2e-teardown
+	$(MAKE) docker-build IMG=$(E2E_IMG)
+	$(MAKE) docker-build-sidecar SIDECAR_IMG=$(E2E_SIDECAR_IMG)
+	$(MAKE) e2e-setup IMG=$(E2E_IMG) SIDECAR_IMG=$(E2E_SIDECAR_IMG)
+	$(MAKE) test-e2e
+
+.PHONY: e2e-rebuild
+e2e-rebuild: ## Rebuild and reload images + packages into existing cluster.
+	$(MAKE) docker-build IMG=$(E2E_IMG)
+	$(MAKE) docker-build-sidecar SIDECAR_IMG=$(E2E_SIDECAR_IMG)
+	$(KIND) load docker-image $(E2E_IMG) --name $(E2E_KIND_CLUSTER)
+	$(KIND) load docker-image $(E2E_SIDECAR_IMG) --name $(E2E_KIND_CLUSTER)
+	$(MAKE) e2e-publish-packages
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -180,6 +239,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/manager && $(KUSTOMIZE) edit set image zarf-sidecar=${SIDECAR_IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
 ##@ Deployment

@@ -1,134 +1,166 @@
 # zarf-operator
-// TODO(user): Add simple overview of use/purpose
+
+A Kubernetes operator that manages the lifecycle of [Zarf](https://zarf.dev) packages as custom resources. It enables declarative, GitOps-compatible deployments of Zarf packages in both connected and airgapped environments.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
 
-## Getting Started
+The Zarf Operator runs two containers in a single pod:
 
-### Option A: Install via Zarf Package
-```
-zarf package deploy oci://ghcr.io/enel1221/zarf-operator-package:0.1.0
-```
+- **Manager** — A controller-runtime reconciler that watches `ZarfPackage` custom resources and drives them through deploy, drift-detect, and removal workflows.
+- **Sidecar** — A gRPC server wrapping the Zarf Go library for headless package operations (deploy, remove, inspect).
 
-### Option B: Install via Helm Chart
-```
-helm install zarf-operator ...
-```
+Key capabilities:
+- **Declarative deploys** — Create a `ZarfPackage` CR and the operator handles the rest.
+- **Drift detection** — Compares deployed Helm releases against desired state via `SyncPolicy` (Ignore / Detect / Remediate).
+- **Retry & backoff** — Configurable retries with exponential backoff on transient failures.
+- **Suspend/resume** — Pause reconciliation without deleting the CR.
+- **Admission webhooks** — Validates and defaults `ZarfPackage` specs at creation and update time.
+- **Airgap-native** — Ships as a Zarf package for fully disconnected environments.
 
-### Option C: Install via Makefile
-```
-make deploy IMG=<some-registry>/zarf-operator:tag
-```
+## Quick Start
 
 ### Prerequisites
-- go version v1.23.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- Kubernetes v1.25+
+- Helm v3.14+
+- (Optional) Zarf CLI for airgapped deployments
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+### Install via Helm
+
+```bash
+helm install zarf-operator oci://ghcr.io/enel1221/charts/zarf-operator --version 0.1.0 \
+  --create-namespace --namespace zarf-operator-system
+```
+
+### Install via Zarf (airgapped)
+
+```bash
+zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:0.1.0-amd64
+```
+
+### Create a ZarfPackage
+
+```yaml
+apiVersion: ops.d0s.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: my-package
+spec:
+  source: "oci://ghcr.io/example/my-package:v1.0.0"
+  components:
+    - component-a
+  syncPolicy: Detect
+```
+
+```bash
+kubectl apply -f my-package.yaml
+kubectl get zarfpackages -w
+```
+
+## Configuration Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source` | string | *required* | OCI reference or file path to the Zarf package |
+| `components` | []string | all | Components to deploy (skip prompt) |
+| `namespace` | string | | Target namespace for deployment |
+| `retries` | int | 3 | Number of deploy retries on failure |
+| `maxRetries` | int32 | 0 | Max consecutive failures before permanent Failed (0=unlimited) |
+| `timeout` | string | 15m | Max duration for deployment |
+| `syncPolicy` | enum | Ignore | Drift handling: Ignore, Detect, Remediate |
+| `suspend` | bool | false | Pause all reconciliation |
+| `yolo` | bool | false | Deploy without `zarf init` (connected only) |
+| `ociConcurrency` | int | 6 | Concurrent OCI layer downloads |
+| `shasum` | string | | Expected SHA256 of the package |
+| `set` | []string | | Package variable overrides (`KEY=VALUE`) |
+| `architecture` | string | | Target architecture override |
+| `skipSignatureValidation` | bool | false | Skip package signature check |
+| `insecureSkipTLSVerify` | bool | false | Skip TLS verification for OCI registry |
+
+## Operations Guide
+
+### Drift Detection
+
+| SyncPolicy | Behavior |
+|------------|----------|
+| **Ignore** | No drift checks (default) |
+| **Detect** | Checks Helm releases on each reconcile; reports drift in status conditions but does not fix |
+| **Remediate** | Detects drift and automatically redeploys to restore desired state |
+
+### Suspend / Resume
+
+```bash
+# Suspend reconciliation
+kubectl patch zarfpackage my-package --type merge -p '{"spec":{"suspend":true}}'
+
+# Resume
+kubectl patch zarfpackage my-package --type merge -p '{"spec":{"suspend":false}}'
+```
+
+### Force Redeploy
+
+Change any deployment-affecting field (source tag, components, etc.) or add/modify an annotation to trigger a new reconciliation.
+
+### Troubleshooting
+
+```bash
+# Check conditions
+kubectl get zarfpackage my-package -o jsonpath='{.status.conditions}' | jq .
+
+# Check events
+kubectl describe zarfpackage my-package
+
+# Check operator logs
+kubectl logs -n zarf-operator-system deploy/zarf-operator-controller-manager -c manager
+kubectl logs -n zarf-operator-system deploy/zarf-operator-controller-manager -c sidecar
+```
+
+### Resource Sizing
+
+| Package Size | Sidecar Memory Limit | Cache Size |
+|-------------|---------------------|------------|
+| Small (<100MB) | 512Mi | 2Gi |
+| Medium (<1GB) | 1Gi | 10Gi |
+| Large (>1GB) | 2Gi | 20Gi |
+
+## Development
+
+### Prerequisites
+- Go 1.23+
+- Docker 17.03+
+- kubectl v1.25+
+- Access to a Kubernetes v1.25+ cluster
+
+### Build and Deploy
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/zarf-operator:tag
-```
-
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
-
-```sh
 make install
-```
-
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
 make deploy IMG=<some-registry>/zarf-operator:tag
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+### Testing
 
 ```sh
-kubectl apply -k config/samples/
+make test       # Unit tests
+make test-e2e   # E2E tests (requires kind)
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+### Uninstall
 
 ```sh
 kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
 make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
 make undeploy
 ```
 
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/zarf-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/zarf-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+1. **Prerequisites**: Go 1.23+, Docker, kind, Helm
+2. **Run tests**: `make test` (unit) or `make test-e2e` (end-to-end with kind)
+3. **Adding features**: Modify types in `api/v1alpha1/`, run `make generate && make manifests`, write tests
+4. **PR conventions**: One logical change per PR, include tests, pass CI
+
+Run `make help` for more information on all potential `make` targets.
 
 More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 

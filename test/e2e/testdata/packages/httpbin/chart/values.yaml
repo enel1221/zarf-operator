@@ -1,0 +1,5 @@
+replicas: 1
+servicePort: 8080
+image:
+  repository: nginx
+  tag: "1.27-alpine"

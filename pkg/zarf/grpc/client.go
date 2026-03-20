@@ -6,6 +6,7 @@ import (
 
 	"github.com/enel1221/zarf-operator/pkg/zarf"
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -23,6 +24,7 @@ type Client struct {
 func NewClient(ctx context.Context, address string) (*Client, error) {
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to zarf sidecar: %w", err)
@@ -62,9 +64,6 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 	if err != nil {
 		return nil, fmt.Errorf("deploy failed: %w", err)
 	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("deploy error: %s", resp.Error)
-	}
 
 	return &zarf.DeployResult{
 		PackageName:        resp.PackageName,
@@ -80,10 +79,7 @@ func (c *Client) GetDeployedPackage(ctx context.Context, packageName string) (*z
 		PackageName: packageName,
 	})
 	if err != nil {
-		return nil, err
-	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("get deployed package error: %s", resp.Error)
+		return nil, fmt.Errorf("get deployed package failed: %w", err)
 	}
 
 	return convertPackageInfo(resp.Package), nil
@@ -93,10 +89,7 @@ func (c *Client) GetDeployedPackage(ctx context.Context, packageName string) (*z
 func (c *Client) ListDeployedPackages(ctx context.Context) ([]zarf.PackageInfo, error) {
 	resp, err := c.client.ListDeployedPackages(ctx, &zarfv1.ListDeployedPackagesRequest{})
 	if err != nil {
-		return nil, err
-	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("list deployed packages error: %s", resp.Error)
+		return nil, fmt.Errorf("list deployed packages failed: %w", err)
 	}
 
 	packages := make([]zarf.PackageInfo, 0, len(resp.Packages))
@@ -116,12 +109,9 @@ func (c *Client) Remove(ctx context.Context, opts zarf.RemoveOptions) error {
 		SkipVersionCheck:  opts.SkipVersionCheck,
 	}
 
-	resp, err := c.client.Remove(ctx, req)
+	_, err := c.client.Remove(ctx, req)
 	if err != nil {
 		return fmt.Errorf("remove failed: %w", err)
-	}
-	if resp.Error != "" {
-		return fmt.Errorf("remove error: %s", resp.Error)
 	}
 	return nil
 }
@@ -132,10 +122,7 @@ func (c *Client) GetPackageMetadata(ctx context.Context, source string) (*zarf.P
 		Source: source,
 	})
 	if err != nil {
-		return nil, err
-	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("get package metadata error: %s", resp.Error)
+		return nil, fmt.Errorf("get package metadata failed: %w", err)
 	}
 
 	return &zarf.PackageMetadata{

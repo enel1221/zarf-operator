@@ -1,0 +1,6 @@
+apiVersion: v2
+name: httpbin
+description: Httpbin chart for e2e testing package variables
+type: application
+version: 0.0.1
+appVersion: "1.0"

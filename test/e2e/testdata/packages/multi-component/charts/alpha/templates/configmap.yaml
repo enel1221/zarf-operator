@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alpha-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: alpha
+data:
+  component: "alpha"
+  label: {{ .Values.label | quote }}

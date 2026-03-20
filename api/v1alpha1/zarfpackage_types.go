@@ -68,9 +68,6 @@ type ZarfPackageSpec struct {
 	// +optional
 	Components []string `json:"components,omitempty"`
 
-	// No reason to have confirm inside an operator
-	// Confirm bool `json:"confirm,omitempty"`
-
 	// Namespace is the Kubernetes namespace to deploy the Zarf package into.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
@@ -78,6 +75,12 @@ type ZarfPackageSpec struct {
 	// Retries is the number of times to retry deploying the Zarf package in case of failure.
 	// +optional
 	Retries int `json:"retries,omitempty"`
+
+	// MaxRetries is the maximum number of consecutive failures before permanently marking
+	// the package as Failed. 0 means unlimited retries.
+	// +optional
+	// +kubebuilder:default=0
+	MaxRetries int32 `json:"maxRetries,omitempty"`
 
 	// Set is a list of key-value pairs as package variables.
 	// +optional
@@ -153,6 +156,12 @@ type ZarfPackageSpec struct {
 	// Only use in connected environments where upstream registries are accessible.
 	// +optional
 	Yolo bool `json:"yolo,omitempty"`
+
+	// Suspend stops reconciliation for this ZarfPackage when set to true.
+	// The controller will not perform any deploy, remove, or drift check operations.
+	// +optional
+	// +kubebuilder:default=false
+	Suspend bool `json:"suspend,omitempty"`
 }
 
 // SyncPolicy defines how the operator handles drift between desired and actual state
@@ -224,6 +233,9 @@ const (
 
 	// ConditionTypeDriftDetected indicates drift was detected between expected and actual state
 	ConditionTypeDriftDetected ZarfPackageConditionType = "DriftDetected"
+
+	// ConditionTypeSuspended indicates reconciliation is suspended
+	ConditionTypeSuspended ZarfPackageConditionType = "Suspended"
 )
 
 // ZarfPackageCondition represents a condition of the ZarfPackage
@@ -246,11 +258,6 @@ type ZarfPackageCondition struct {
 
 // ZarfPackageStatus defines the observed state of ZarfPackage.
 type ZarfPackageStatus struct {
-	// Package string `json:"package,omitempty"`
-	// NamespaceOverride string `json:"namespaceOverride,omitempty"`
-	// Version string `json:"version,omitempty"`
-	// Components []string `json:"components,omitempty"`
-
 	// Phase is the current phase of the deployment
 	Phase ZarfPackagePhase `json:"phase,omitempty"`
 
@@ -284,6 +291,14 @@ type ZarfPackageStatus struct {
 	// DeployedSpecHash is the hash of deployment-affecting spec fields
 	// Used to detect when a redeployment is needed (follows Flux's lastAttemptedConfigDigest pattern)
 	DeployedSpecHash string `json:"deployedSpecHash,omitempty"`
+
+	// FailureCount tracks consecutive reconciliation failures for backoff calculation.
+	// +optional
+	FailureCount int32 `json:"failureCount,omitempty"`
+
+	// LastFailureTime is when the last failure occurred.
+	// +optional
+	LastFailureTime *metav1.Time `json:"lastFailureTime,omitempty"`
 }
 
 type DriftInfo struct {

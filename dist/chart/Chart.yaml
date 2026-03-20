@@ -14,3 +14,15 @@ keywords:
   - kubernetes
   - operator
   - airgap
+annotations:
+  artifacthub.io/category: security
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Seamless Upgrades
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/crds: |
+    - kind: ZarfPackage
+      version: v1alpha1
+      name: zarfpackage
+      displayName: Zarf Package
+      description: Declarative Zarf package deployment

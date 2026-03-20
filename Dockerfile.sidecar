@@ -5,23 +5,41 @@ ARG TARGETARCH
 
 WORKDIR /workspace
 
-# Copy all source files needed for build
 COPY go.mod go.sum ./
+RUN go mod download
+
 COPY cmd/ cmd/
 COPY api/ api/
 COPY pkg/ pkg/
 COPY internal/ internal/
 COPY proto/ proto/
 
-# Build
-# the GOARCH has not a default value to allow the binary be built according to the host where the command
-# having linux as the only OS. This is relevant in scenarios where the same binary needs to be run on different
-# architectures, such as Docker containers or cross-compiling for different platforms.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o zarf-sidecar ./cmd/sidecar
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o zarf-sidecar ./cmd/sidecar
 
-# Use distroless as minimal base image to package the sidecar binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# Use Alpine as base — Zarf package deployments may execute shell scripts,
+# component actions, and wait-for hooks that require bash and common CLI tools.
+FROM alpine:3.21
+
+ARG TARGETARCH
+ARG ZARF_VERSION=0.69.0
+
+RUN apk add --no-cache \
+    bash \
+    coreutils \
+    curl \
+    git \
+    grep \
+    gzip \
+    jq \
+    openssh-client \
+    openssl \
+    procps \
+    sed \
+    tar \
+    wget \
+    && adduser -D -u 65532 -g 65532 nonroot \
+    && curl -fsSL "https://github.com/zarf-dev/zarf/releases/download/v${ZARF_VERSION}/zarf_v${ZARF_VERSION}_Linux_${TARGETARCH}" -o /usr/local/bin/zarf \
+    && chmod +x /usr/local/bin/zarf
 WORKDIR /
 COPY --from=builder /workspace/zarf-sidecar .
 USER 65532:65532

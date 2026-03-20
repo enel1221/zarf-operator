@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -248,4 +249,9 @@ func UncommentCode(filename, target, prefix string) error {
 	// false positive
 	// nolint:gosec
 	return os.WriteFile(filename, out.Bytes(), 0644)
+}
+
+// StringReader returns an io.Reader from a string, useful for passing YAML to kubectl stdin.
+func StringReader(s string) io.Reader {
+	return strings.NewReader(s)
 }

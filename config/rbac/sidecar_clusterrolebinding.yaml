@@ -8,5 +8,5 @@ roleRef:
   name: zarf-sidecar-role
 subjects:
 - kind: ServiceAccount
-  name: zarf-operator-controller-manager
+  name: controller-manager
   namespace: system

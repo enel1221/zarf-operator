@@ -25,6 +25,15 @@ spec:
         {{- end }}
         {{- end }}
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    control-plane: controller-manager
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: manager
           args:
@@ -84,7 +93,8 @@ spec:
       volumes:
         {{- if .Values.sidecar.enabled }}
         - name: cache
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.sidecar.cache.sizeLimit | default "10Gi" }}
         {{- end }}
         {{- if and .Values.metrics.enable .Values.certmanager.enable }}
         - name: metrics-certs

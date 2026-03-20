@@ -216,7 +216,6 @@ type DeployResponse struct {
 	Version            string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
 	Generation         int32                  `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
 	DeployedComponents []*DeployedComponent   `protobuf:"bytes,4,rep,name=deployed_components,json=deployedComponents,proto3" json:"deployed_components,omitempty"`
-	Error              string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -277,13 +276,6 @@ func (x *DeployResponse) GetDeployedComponents() []*DeployedComponent {
 		return x.DeployedComponents
 	}
 	return nil
-}
-
-func (x *DeployResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
 }
 
 type DeployedComponent struct {
@@ -492,7 +484,6 @@ func (x *RemoveRequest) GetSkipVersionCheck() bool {
 
 type RemoveResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Error         string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -525,13 +516,6 @@ func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RemoveResponse.ProtoReflect.Descriptor instead.
 func (*RemoveResponse) Descriptor() ([]byte, []int) {
 	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *RemoveResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
 }
 
 type GetDeployedPackageRequest struct {
@@ -581,7 +565,6 @@ func (x *GetDeployedPackageRequest) GetPackageName() string {
 type GetDeployedPackageResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Package       *PackageInfo           `protobuf:"bytes,1,opt,name=package,proto3" json:"package,omitempty"`
-	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -623,13 +606,6 @@ func (x *GetDeployedPackageResponse) GetPackage() *PackageInfo {
 	return nil
 }
 
-func (x *GetDeployedPackageResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
 type ListDeployedPackagesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -669,7 +645,6 @@ func (*ListDeployedPackagesRequest) Descriptor() ([]byte, []int) {
 type ListDeployedPackagesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Packages      []*PackageInfo         `protobuf:"bytes,1,rep,name=packages,proto3" json:"packages,omitempty"`
-	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -709,13 +684,6 @@ func (x *ListDeployedPackagesResponse) GetPackages() []*PackageInfo {
 		return x.Packages
 	}
 	return nil
-}
-
-func (x *ListDeployedPackagesResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
 }
 
 type PackageInfo struct {
@@ -849,7 +817,6 @@ func (x *GetPackageMetadataRequest) GetSource() string {
 type GetPackageMetadataResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Metadata      *PackageMetadata       `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -889,13 +856,6 @@ func (x *GetPackageMetadataResponse) GetMetadata() *PackageMetadata {
 		return x.Metadata
 	}
 	return nil
-}
-
-func (x *GetPackageMetadataResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
 }
 
 type PackageMetadata struct {
@@ -1102,15 +1062,14 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\tyolo_mode\x18\x13 \x01(\bR\byoloMode\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc0\x01\n" +
 	"\x0eDeployResponse\x12!\n" +
 	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x03 \x01(\x05R\n" +
 	"generation\x12K\n" +
-	"\x13deployed_components\x18\x04 \x03(\v2\x1a.zarf.v1.DeployedComponentR\x12deployedComponents\x12\x14\n" +
-	"\x05error\x18\x05 \x01(\tR\x05error\"\xb4\x01\n" +
+	"\x13deployed_components\x18\x04 \x03(\v2\x1a.zarf.v1.DeployedComponentR\x12deployedComponentsJ\x04\b\x05\x10\x06\"\xb4\x01\n" +
 	"\x11DeployedComponent\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12B\n" +
@@ -1128,18 +1087,15 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"components\x123\n" +
 	"\atimeout\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12-\n" +
 	"\x12namespace_override\x18\x04 \x01(\tR\x11namespaceOverride\x12,\n" +
-	"\x12skip_version_check\x18\x05 \x01(\bR\x10skipVersionCheck\"&\n" +
-	"\x0eRemoveResponse\x12\x14\n" +
-	"\x05error\x18\x01 \x01(\tR\x05error\">\n" +
+	"\x12skip_version_check\x18\x05 \x01(\bR\x10skipVersionCheck\"\x16\n" +
+	"\x0eRemoveResponseJ\x04\b\x01\x10\x02\">\n" +
 	"\x19GetDeployedPackageRequest\x12!\n" +
-	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\"b\n" +
+	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\"R\n" +
 	"\x1aGetDeployedPackageResponse\x12.\n" +
-	"\apackage\x18\x01 \x01(\v2\x14.zarf.v1.PackageInfoR\apackage\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\x1d\n" +
-	"\x1bListDeployedPackagesRequest\"f\n" +
+	"\apackage\x18\x01 \x01(\v2\x14.zarf.v1.PackageInfoR\apackageJ\x04\b\x02\x10\x03\"\x1d\n" +
+	"\x1bListDeployedPackagesRequest\"V\n" +
 	"\x1cListDeployedPackagesResponse\x120\n" +
-	"\bpackages\x18\x01 \x03(\v2\x14.zarf.v1.PackageInfoR\bpackages\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\xf8\x01\n" +
+	"\bpackages\x18\x01 \x03(\v2\x14.zarf.v1.PackageInfoR\bpackagesJ\x04\b\x02\x10\x03\"\xf8\x01\n" +
 	"\vPackageInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1e\n" +
@@ -1151,10 +1107,9 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\x13deployed_components\x18\x05 \x03(\v2\x1a.zarf.v1.DeployedComponentR\x12deployedComponents\x12-\n" +
 	"\x12namespace_override\x18\x06 \x01(\tR\x11namespaceOverride\"3\n" +
 	"\x19GetPackageMetadataRequest\x12\x16\n" +
-	"\x06source\x18\x01 \x01(\tR\x06source\"h\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\"X\n" +
 	"\x1aGetPackageMetadataResponse\x124\n" +
-	"\bmetadata\x18\x01 \x01(\v2\x18.zarf.v1.PackageMetadataR\bmetadata\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\xa5\x01\n" +
+	"\bmetadata\x18\x01 \x01(\v2\x18.zarf.v1.PackageMetadataR\bmetadataJ\x04\b\x02\x10\x03\"\xa5\x01\n" +
 	"\x0fPackageMetadata\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12 \n" +

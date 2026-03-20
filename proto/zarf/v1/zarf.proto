@@ -53,7 +53,7 @@ message DeployResponse {
     string version = 2;
     int32 generation = 3;
     repeated DeployedComponent deployed_components = 4;
-    string error = 5;
+    reserved 5;
 }
 
 message DeployedComponent {
@@ -78,7 +78,7 @@ message RemoveRequest {
 }
 
 message RemoveResponse {
-    string error = 1;
+    reserved 1;
 }
 
 message GetDeployedPackageRequest {
@@ -87,14 +87,14 @@ message GetDeployedPackageRequest {
 
 message GetDeployedPackageResponse {
     PackageInfo package = 1;
-    string error = 2;
+    reserved 2;
 }
 
 message ListDeployedPackagesRequest {}
 
 message ListDeployedPackagesResponse {
     repeated PackageInfo packages = 1;
-    string error = 2;
+    reserved 2;
 }
 
 message PackageInfo {
@@ -112,7 +112,7 @@ message GetPackageMetadataRequest {
 
 message GetPackageMetadataResponse {
     PackageMetadata metadata = 1;
-    string error = 2;
+    reserved 2;
 }
 
 message PackageMetadata {

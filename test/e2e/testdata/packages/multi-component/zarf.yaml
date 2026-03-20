@@ -1,0 +1,39 @@
+kind: ZarfPackageConfig
+metadata:
+  name: e2e-test-multi-component
+  description: Multi-component package for e2e testing component selection
+  version: 0.0.1
+  yolo: true
+
+components:
+  - name: alpha
+    required: true
+    charts:
+      - name: alpha
+        namespace: e2e-test-multi
+        version: 0.0.1
+        localPath: charts/alpha
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: configmap
+                name: alpha-config
+                namespace: e2e-test-multi
+
+  - name: beta
+    required: false
+    charts:
+      - name: beta
+        namespace: e2e-test-multi
+        version: 0.0.1
+        localPath: charts/beta
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: configmap
+                name: beta-config
+                namespace: e2e-test-multi

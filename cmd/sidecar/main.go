@@ -5,15 +5,19 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/enel1221/zarf-operator/cmd/sidecar/interceptors"
 	"github.com/enel1221/zarf-operator/cmd/sidecar/server"
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
 	"github.com/zarf-dev/zarf/src/pkg/logger"
@@ -68,7 +72,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(
+			interceptors.UnaryLogging(baseLogger),
+			interceptors.UnaryMetrics(),
+		),
+	)
 
 	// Register Zarf service
 	zarfServer := server.NewZarfServer(baseLogger, baseConfig, Version)
@@ -84,8 +94,19 @@ func main() {
 
 	baseLogger.Info("zarf sidecar listening", "address", addr, "logLevel", level.String(), "logFormat", baseConfig.Format)
 
+	// Serve Prometheus metrics on a separate HTTP port
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{Addr: ":9090", Handler: metricsMux}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			baseLogger.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	go func() {
 		<-ctx.Done()
+		metricsServer.Close()
 		grpcServer.GracefulStop()
 	}()
 

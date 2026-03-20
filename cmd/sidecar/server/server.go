@@ -17,6 +17,8 @@ import (
 	"github.com/zarf-dev/zarf/src/pkg/packager/filters"
 	"github.com/zarf-dev/zarf/src/pkg/state"
 	"github.com/zarf-dev/zarf/src/pkg/zoci"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
@@ -89,6 +91,10 @@ func (s *ZarfServer) baseLoggerWithContext(ctx context.Context) (*slog.Logger, c
 func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*zarfv1.DeployResponse, error) {
 	log, ctx := s.loggerForRequest(ctx, req)
 
+	if strings.TrimSpace(req.Source) == "" {
+		return nil, status.Error(codes.InvalidArgument, "source is required")
+	}
+
 	// Apply Zarf defaults for headless operation
 	if req.Retries == 0 {
 		req.Retries = 3
@@ -131,13 +137,17 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		Filter:         filters.Empty(),
 		LayersSelector: zoci.AllLayers,
 		CachePath:      s.cachePath,
+		RemoteOptions: packager.RemoteOptions{
+			PlainHTTP:             req.PlainHttp,
+			InsecureSkipTLSVerify: req.InsecureSkipTlsVerify,
+		},
 	}
 	log.Debug("loading package", "source", req.Source, "architecture", req.Architecture)
 
 	pkgLayout, err := packager.LoadPackage(ctx, req.Source, loadOpts)
 	if err != nil {
 		log.Error("failed to load package", "error", err, "source", req.Source)
-		return &zarfv1.DeployResponse{Error: fmt.Sprintf("failed to load package: %v", err)}, nil
+		return nil, status.Errorf(codes.Internal, "failed to load package: %v", err)
 	}
 	defer func() {
 		if err := pkgLayout.Cleanup(); err != nil {
@@ -154,7 +164,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		pkgLayout.Pkg.Components, err = componentFilter.Apply(pkgLayout.Pkg)
 		if err != nil {
 			log.Error("failed to filter components", "error", err, "components", req.Components)
-			return &zarfv1.DeployResponse{Error: fmt.Sprintf("failed to filter components: %v", err)}, nil
+			return nil, status.Errorf(codes.InvalidArgument, "failed to filter components: %v", err)
 		}
 		log.Info("filtered components", "requested", req.Components, "selected", len(pkgLayout.Pkg.Components))
 	}
@@ -185,7 +195,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	result, err := packager.Deploy(ctx, pkgLayout, deployOpts)
 	if err != nil {
 		log.Error("deployment failed", "error", err, "package", pkgLayout.Pkg.Metadata.Name)
-		return &zarfv1.DeployResponse{Error: fmt.Sprintf("deployment failed: %v", err)}, nil
+		return nil, status.Errorf(codes.Internal, "deployment failed: %v", err)
 	}
 
 	// Convert result
@@ -232,13 +242,16 @@ func (s *ZarfServer) GetDeployedPackage(
 	c, err := cluster.New(ctx)
 	if err != nil {
 		log.Error("failed to connect to cluster", "error", err)
-		return &zarfv1.GetDeployedPackageResponse{Error: fmt.Sprintf("failed to connect to cluster: %v", err)}, nil
+		return nil, status.Errorf(codes.Unavailable, "failed to connect to cluster: %v", err)
 	}
 
 	deployedPkg, err := c.GetDeployedPackage(ctx, req.PackageName)
 	if err != nil {
 		log.Error("failed to get package", "error", err, "package", req.PackageName)
-		return &zarfv1.GetDeployedPackageResponse{Error: fmt.Sprintf("failed to get package: %v", err)}, nil
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, status.Errorf(codes.NotFound, "package %q not found: %v", req.PackageName, err)
+		}
+		return nil, status.Errorf(codes.Internal, "failed to get package: %v", err)
 	}
 	log.Info("retrieved deployed package", "package", req.PackageName)
 
@@ -257,13 +270,13 @@ func (s *ZarfServer) ListDeployedPackages(
 	c, err := cluster.New(ctx)
 	if err != nil {
 		log.Error("failed to connect to cluster", "error", err)
-		return &zarfv1.ListDeployedPackagesResponse{Error: fmt.Sprintf("failed to connect to cluster: %v", err)}, nil
+		return nil, status.Errorf(codes.Unavailable, "failed to connect to cluster: %v", err)
 	}
 
 	packages, err := c.GetDeployedZarfPackages(ctx)
 	if err != nil {
 		log.Error("failed to list packages", "error", err)
-		return &zarfv1.ListDeployedPackagesResponse{Error: fmt.Sprintf("failed to list packages: %v", err)}, nil
+		return nil, status.Errorf(codes.Internal, "failed to list packages: %v", err)
 	}
 	log.Info("listed deployed packages", "count", len(packages))
 
@@ -279,18 +292,25 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 	log, ctx := s.baseLoggerWithContext(ctx)
 	log.Info("remove request received", "package", req.PackageName, "components", req.Components)
 
+	if strings.TrimSpace(req.PackageName) == "" {
+		return nil, status.Error(codes.InvalidArgument, "package_name is required")
+	}
+
 	// Connect to cluster
 	c, err := cluster.New(ctx)
 	if err != nil {
 		log.Error("failed to connect to cluster", "error", err)
-		return &zarfv1.RemoveResponse{Error: fmt.Sprintf("failed to connect to cluster: %v", err)}, nil
+		return nil, status.Errorf(codes.Unavailable, "failed to connect to cluster: %v", err)
 	}
 
 	// Get deployed package to retrieve the full package definition
 	deployedPkg, err := c.GetDeployedPackage(ctx, req.PackageName)
 	if err != nil {
 		log.Error("failed to get deployed package", "error", err, "package", req.PackageName)
-		return &zarfv1.RemoveResponse{Error: fmt.Sprintf("failed to get deployed package: %v", err)}, nil
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, status.Errorf(codes.NotFound, "package %q not found: %v", req.PackageName, err)
+		}
+		return nil, status.Errorf(codes.Internal, "failed to get deployed package: %v", err)
 	}
 
 	// Set timeout default
@@ -310,7 +330,7 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 	// Perform removal
 	if err := packager.Remove(ctx, deployedPkg.Data, removeOpts); err != nil {
 		log.Error("removal failed", "error", err, "package", req.PackageName)
-		return &zarfv1.RemoveResponse{Error: fmt.Sprintf("removal failed: %v", err)}, nil
+		return nil, status.Errorf(codes.Internal, "removal failed: %v", err)
 	}
 
 	log.Info("package removed successfully", "package", req.PackageName)
@@ -325,11 +345,15 @@ func (s *ZarfServer) GetPackageMetadata(
 	log.Debug("get package metadata", "source", req.Source)
 
 	// Load package metadata without deploying
+	if strings.TrimSpace(req.Source) == "" {
+		return nil, status.Error(codes.InvalidArgument, "source is required")
+	}
+
 	loadOpts := packager.LoadOptions{}
 	pkgLayout, err := packager.LoadPackage(ctx, req.Source, loadOpts)
 	if err != nil {
 		log.Error("failed to load package metadata", "error", err, "source", req.Source)
-		return &zarfv1.GetPackageMetadataResponse{Error: fmt.Sprintf("failed to load: %v", err)}, nil
+		return nil, status.Errorf(codes.Internal, "failed to load package metadata: %v", err)
 	}
 	defer func() {
 		if err := pkgLayout.Cleanup(); err != nil {

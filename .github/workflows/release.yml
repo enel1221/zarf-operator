@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ ! "${TAG}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Invalid tag format: ${TAG}. Expected vX.Y.Z"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          MAJOR="${VERSION%%.*}"
+          if (( MAJOR < 1 )); then
+            IS_PRERELEASE=true
+            RELEASE_CHANNEL=alpha
+          else
+            IS_PRERELEASE=false
+            RELEASE_CHANNEL=stable
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_channel=${RELEASE_CHANNEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            NOTES=$(git log --oneline --pretty=format:"- %s" HEAD)
+          else
+            NOTES=$(git log --oneline --pretty=format:"- %s" ${PREV_TAG}..HEAD)
+          fi
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Wait for CI to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.ref }}
+          running-workflow-name: 'Create Release'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Zarf
+        uses: defenseunicorns/setup-zarf@main
+        with:
+          version: v0.42.2
+
+      - name: Build install manifest
+        run: |
+          make build-installer \
+            VERSION=${{ steps.meta.outputs.version }} \
+            IMG=ghcr.io/enel1221/zarf-operator:${{ github.ref_name }} \
+            SIDECAR_IMG=ghcr.io/enel1221/zarf-operator-sidecar:${{ github.ref_name }}
+
+      - name: Build Zarf packages for release assets
+        run: |
+          cd dist
+          zarf package create . --confirm --output . \
+            --architecture amd64 \
+            --set VERSION=${{ steps.meta.outputs.version }} \
+            --set OPERATOR_IMAGE=ghcr.io/enel1221/zarf-operator \
+            --set OPERATOR_IMAGE_TAG=${{ github.ref_name }} \
+            --set SIDECAR_IMAGE=ghcr.io/enel1221/zarf-operator-sidecar \
+            --set SIDECAR_IMAGE_TAG=${{ github.ref_name }}
+
+          zarf package create . --confirm --output . \
+            --architecture arm64 \
+            --set VERSION=${{ steps.meta.outputs.version }} \
+            --set OPERATOR_IMAGE=ghcr.io/enel1221/zarf-operator \
+            --set OPERATOR_IMAGE_TAG=${{ github.ref_name }} \
+            --set SIDECAR_IMAGE=ghcr.io/enel1221/zarf-operator-sidecar \
+            --set SIDECAR_IMAGE_TAG=${{ github.ref_name }}
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          test -f dist/install.yaml || { echo "dist/install.yaml is missing"; exit 1; }
+          ls dist/zarf-package-zarf-operator-*.tar.zst >/dev/null 2>&1 || { echo "No zarf package assets generated"; exit 1; }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ steps.meta.outputs.is_prerelease }}
+          body: |
+            Release channel: **${{ steps.meta.outputs.release_channel }}**
+
+            ## Installation
+
+            ### Install bundle (single manifest)
+            Download `install.yaml` from release assets, then:
+            ```
+            kubectl apply -f install.yaml
+            ```
+
+            ### Helm
+            ```
+            helm install zarf-operator oci://ghcr.io/enel1221/charts/zarf-operator --version ${{ steps.meta.outputs.version }}
+            ```
+
+            ### Zarf (airgapped)
+            ```
+            zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:${{ steps.meta.outputs.version }}-amd64
+            ```
+          files: |
+            dist/install.yaml
+            dist/zarf-package-zarf-operator-*.tar.zst
+          generate_release_notes: true

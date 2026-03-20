@@ -90,6 +90,13 @@ spec:
               logLevel:
                 description: LogLevel is the level of logging for the Zarf package.
                 type: string
+              maxRetries:
+                default: 0
+                description: |-
+                  MaxRetries is the maximum number of consecutive failures before permanently marking
+                  the package as Failed. 0 means unlimited retries.
+                format: int32
+                type: integer
               namespace:
                 description: Namespace is the Kubernetes namespace to deploy the Zarf
                   package into.
@@ -125,6 +132,12 @@ spec:
               source:
                 description: Source is the location of the Zarf package OCI
                 type: string
+              suspend:
+                default: false
+                description: |-
+                  Suspend stops reconciliation for this ZarfPackage when set to true.
+                  The controller will not perform any deploy, remove, or drift check operations.
+                type: boolean
               syncPolicy:
                 allOf:
                 - enum:
@@ -270,6 +283,15 @@ spec:
                 required:
                 - detected
                 type: object
+              failureCount:
+                description: FailureCount tracks consecutive reconciliation failures
+                  for backoff calculation.
+                format: int32
+                type: integer
+              lastFailureTime:
+                description: LastFailureTime is when the last failure occurred.
+                format: date-time
+                type: string
               lastReconcileTime:
                 description: LastReconcileTime is when the package was last reconciled
                 format: date-time

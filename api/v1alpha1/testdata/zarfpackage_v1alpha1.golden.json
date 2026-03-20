@@ -1,0 +1,36 @@
+{
+  "apiVersion": "ops.d0s.dev/v1alpha1",
+  "kind": "ZarfPackage",
+  "metadata": {
+    "name": "golden-test",
+    "namespace": "default",
+    "creationTimestamp": null
+  },
+  "spec": {
+    "source": "oci://example.com/pkg:v1",
+    "adoptExistingResources": true,
+    "components": ["comp-a", "comp-b"],
+    "namespace": "target-ns",
+    "retries": 3,
+    "maxRetries": 5,
+    "set": ["KEY=val"],
+    "shasum": "abc123",
+    "skipSignatureValidation": false,
+    "timeout": "15m",
+    "architecture": "amd64",
+    "features": ["feat-a"],
+    "insecureSkipTLSVerify": false,
+    "key": "/path/to/key",
+    "logFormat": "json",
+    "logLevel": "info",
+    "noColor": true,
+    "ociConcurrency": 6,
+    "plainHTTP": false,
+    "tmpdir": "/tmp/zarf",
+    "zarfCache": "/cache",
+    "syncPolicy": "Detect",
+    "yolo": false,
+    "suspend": false
+  },
+  "status": {}
+}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nginx-test
+description: Minimal nginx for e2e testing
+type: application
+version: 0.0.1
+appVersion: "1.27"

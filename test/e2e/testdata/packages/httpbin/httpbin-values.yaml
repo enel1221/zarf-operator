@@ -1,0 +1,2 @@
+replicas: "###ZARF_VAR_REPLICAS###"
+servicePort: "###ZARF_VAR_SERVICE_PORT###"
