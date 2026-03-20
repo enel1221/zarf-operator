@@ -105,7 +105,20 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 	$(KIND) load docker-image registry:2 --name $(E2E_KIND_CLUSTER)
 	@echo "Deploying in-cluster OCI registry..."
 	$(KUBECTL) apply -f test/e2e/testdata/registry.yaml
-	$(KUBECTL) wait --for=condition=available deployment/registry -n e2e-registry --timeout=120s
+	$(KUBECTL) rollout status deployment/registry -n e2e-registry --timeout=120s
+	@echo "Waiting for registry to be reachable on localhost:$(E2E_REGISTRY_HOST_PORT)..."
+	@for i in $$(seq 1 30); do \
+		if curl -sf http://localhost:$(E2E_REGISTRY_HOST_PORT)/v2/ >/dev/null 2>&1; then \
+			echo "Registry is ready."; \
+			break; \
+		fi; \
+		if [ $$i -eq 30 ]; then \
+			echo "Error: Registry not reachable after 30 attempts."; \
+			exit 1; \
+		fi; \
+		echo "  Attempt $$i/30 - registry not ready, retrying in 2s..."; \
+		sleep 2; \
+	done
 	$(MAKE) e2e-publish-packages
 	@echo "E2E cluster setup complete."
 
