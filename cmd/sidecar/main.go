@@ -106,7 +106,9 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
-		metricsServer.Close()
+		if err := metricsServer.Close(); err != nil {
+			baseLogger.Error("failed to close metrics server", "error", err)
+		}
 		grpcServer.GracefulStop()
 	}()
 

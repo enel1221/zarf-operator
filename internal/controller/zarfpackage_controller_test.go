@@ -40,6 +40,7 @@ import (
 
 var _ = Describe("ZarfPackage Controller", func() {
 	ctx := context.Background()
+	const testPackageName = "pkg"
 
 	newReconciler := func(zc zarf.Client) *ZarfPackageReconciler {
 		return &ZarfPackageReconciler{
@@ -114,7 +115,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
 				deployCalled++
 				Expect(opts.Source).To(Equal("oci://example.com/pkg:v1"))
-				return &zarf.DeployResult{PackageName: "pkg", Version: "v1", Generation: 1}, nil
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
 			})
 
 			reconciler := newReconciler(fakeZarf)
@@ -136,10 +137,10 @@ var _ = Describe("ZarfPackage Controller", func() {
 
 			deployCalled := 0
 			fakeZarf := fake.New().
-				WithGetDeployedPackage(&zarf.PackageInfo{Name: "pkg", Version: "v1", Generation: 1}, nil).
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: "v1", Generation: 1}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: "pkg", Version: "v1", Generation: deployCalled}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: deployCalled}, nil
 				})
 			rec := record.NewFakeRecorder(100)
 			reconciler := &ZarfPackageReconciler{
@@ -177,14 +178,14 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("failed-component-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg"
+			obj.Status.PackageName = testPackageName
 			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			deployCalled := 0
 			fakeZarf := fake.New().
 				WithGetDeployedPackage(&zarf.PackageInfo{
-					Name:       "pkg",
+					Name:       testPackageName,
 					Version:    "v1",
 					Generation: 1,
 					DeployedComponents: []zarf.DeployedComponent{
@@ -193,7 +194,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 				}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: "pkg", Version: "v1", Generation: 2}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
 				})
 
 			reconciler := newReconciler(fakeZarf)
@@ -206,17 +207,17 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("in-sync-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg"
+			obj.Status.PackageName = testPackageName
 			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
 			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			deployCalled := 0
 			fakeZarf := fake.New().
-				WithGetDeployedPackage(&zarf.PackageInfo{Name: "pkg", Version: "v1", Generation: 1}, nil).
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: "v1", Generation: 1}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: "pkg", Version: "v1", Generation: 2}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
 				})
 
 			reconciler := newReconciler(fakeZarf)
@@ -300,7 +301,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("sync-status-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg"
+			obj.Status.PackageName = testPackageName
 			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
@@ -336,14 +337,14 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
 
 			obj = getResource(nn)
-			obj.Status.PackageName = "pkg"
+			obj.Status.PackageName = testPackageName
 			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			deployCalled := 0
 			fakeZarf := fake.New().
 				WithGetDeployedPackage(&zarf.PackageInfo{
-					Name:       "pkg",
+					Name:       testPackageName,
 					Version:    "1.0.0",
 					Generation: 1,
 					DeployedComponents: []zarf.DeployedComponent{
@@ -358,7 +359,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 				}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: "pkg", Version: "1.0.0", Generation: 2}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "1.0.0", Generation: 2}, nil
 				})
 
 			rec := record.NewFakeRecorder(100)
@@ -404,14 +405,14 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
 
 			obj = getResource(nn)
-			obj.Status.PackageName = "pkg"
+			obj.Status.PackageName = testPackageName
 			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			deployCalled := 0
 			fakeZarf := fake.New().
 				WithGetDeployedPackage(&zarf.PackageInfo{
-					Name:       "pkg",
+					Name:       testPackageName,
 					Version:    "1.0.0",
 					Generation: 1,
 					DeployedComponents: []zarf.DeployedComponent{
@@ -426,7 +427,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 				}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: "pkg", Version: "1.0.0", Generation: 2}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "1.0.0", Generation: 2}, nil
 				})
 
 			reconciler := newReconciler(fakeZarf)
@@ -569,14 +570,13 @@ var _ = Describe("ZarfPackage Controller", func() {
 			deployCalled := 0
 			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 				deployCalled++
-				return &zarf.DeployResult{PackageName: "pkg", Version: "v1", Generation: 1}, nil
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
 			})
 
 			reconciler := newReconciler(fakeZarf)
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
-			Expect(result.Requeue).To(BeFalse())
 			Expect(deployCalled).To(Equal(0))
 
 			updated := getResource(nn)
@@ -595,7 +595,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			deployCalled := 0
 			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 				deployCalled++
-				return &zarf.DeployResult{PackageName: "pkg", Version: "v1", Generation: 1}, nil
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
 			})
 			reconciler := newReconciler(fakeZarf)
 

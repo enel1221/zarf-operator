@@ -716,6 +716,80 @@ spec:
 			targetNamespace   = "e2e-test-multi"
 		)
 
+		deployAndAssertComponents := func(
+			zarfPkgName string,
+			selectedComponents []string,
+			expectedConfigMaps []string,
+			unexpectedConfigMaps []string,
+			expectedComponentStatuses []string,
+			unexpectedComponentStatuses []string,
+		) {
+			componentsYAML := ""
+			if len(selectedComponents) > 0 {
+				componentsYAML = "\n  components:\n"
+				for _, component := range selectedComponents {
+					componentsYAML += fmt.Sprintf("    - %s\n", component)
+				}
+			}
+
+			By("applying a ZarfPackage CR")
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-multi-component:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true%s
+`, zarfPkgName, multiPkgNamespace, registryURL, componentsYAML)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(zarfPkgYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the ZarfPackage reaches Deployed phase")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
+					"-n", multiPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Deployed"))
+			}, 5*time.Minute).Should(Succeed())
+
+			for _, configMapName := range expectedConfigMaps {
+				By(fmt.Sprintf("verifying %s ConfigMap exists", configMapName))
+				cmd = exec.Command("kubectl", "get", "configmap", configMapName,
+					"-n", targetNamespace)
+				_, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("%s should exist", configMapName))
+			}
+
+			for _, configMapName := range unexpectedConfigMaps {
+				By(fmt.Sprintf("verifying %s ConfigMap does NOT exist", configMapName))
+				cmd = exec.Command("kubectl", "get", "configmap", configMapName,
+					"-n", targetNamespace)
+				_, err = utils.Run(cmd)
+				Expect(err).To(HaveOccurred(), fmt.Sprintf("%s should NOT exist", configMapName))
+			}
+
+			By("verifying componentStatuses")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
+				"-n", multiPkgNamespace,
+				"-o", "jsonpath={.status.componentStatuses[*].name}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			for _, componentName := range expectedComponentStatuses {
+				Expect(output).To(ContainSubstring(componentName))
+			}
+			for _, componentName := range unexpectedComponentStatuses {
+				Expect(output).NotTo(ContainSubstring(componentName))
+			}
+		}
+
 		AfterEach(func() {
 			By("cleaning up multi-component ZarfPackage CRs")
 			for _, name := range []string{"e2e-multi-required", "e2e-multi-all"} {
@@ -731,116 +805,25 @@ spec:
 		})
 
 		It("should deploy only explicitly selected components", func() {
-			const zarfPkgName = "e2e-multi-required"
-
-			By("applying a ZarfPackage CR selecting only the alpha component")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
-kind: ZarfPackage
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  source: "oci://%s/e2e-test-multi-component:0.0.1"
-  plainHTTP: true
-  yolo: true
-  skipSignatureValidation: true
-  components:
-    - alpha
-`, zarfPkgName, multiPkgNamespace, registryURL)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = utils.StringReader(zarfPkgYAML)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying the ZarfPackage reaches Deployed phase")
-			verifyDeployed := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
-					"-n", multiPkgNamespace,
-					"-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Deployed"))
-			}
-			Eventually(verifyDeployed, 5*time.Minute).Should(Succeed())
-
-			By("verifying alpha-config ConfigMap exists")
-			cmd = exec.Command("kubectl", "get", "configmap", "alpha-config",
-				"-n", targetNamespace)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "alpha-config should exist (required component)")
-
-			By("verifying beta-config ConfigMap does NOT exist")
-			cmd = exec.Command("kubectl", "get", "configmap", "beta-config",
-				"-n", targetNamespace)
-			_, err = utils.Run(cmd)
-			Expect(err).To(HaveOccurred(), "beta-config should NOT exist (optional component not selected)")
-
-			By("verifying only alpha is in componentStatuses")
-			cmd = exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
-				"-n", multiPkgNamespace,
-				"-o", "jsonpath={.status.componentStatuses[*].name}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("alpha"))
-			Expect(output).NotTo(ContainSubstring("beta"))
+			deployAndAssertComponents(
+				"e2e-multi-required",
+				[]string{"alpha"},
+				[]string{"alpha-config"},
+				[]string{"beta-config"},
+				[]string{"alpha"},
+				[]string{"beta"},
+			)
 		})
 
 		It("should deploy all selected components including optional", func() {
-			const zarfPkgName = "e2e-multi-all"
-
-			By("applying a ZarfPackage CR with both components selected")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
-kind: ZarfPackage
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  source: "oci://%s/e2e-test-multi-component:0.0.1"
-  plainHTTP: true
-  yolo: true
-  skipSignatureValidation: true
-  components:
-    - alpha
-    - beta
-`, zarfPkgName, multiPkgNamespace, registryURL)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = utils.StringReader(zarfPkgYAML)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying the ZarfPackage reaches Deployed phase")
-			verifyDeployed := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
-					"-n", multiPkgNamespace,
-					"-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Deployed"))
-			}
-			Eventually(verifyDeployed, 5*time.Minute).Should(Succeed())
-
-			By("verifying alpha-config ConfigMap exists")
-			cmd = exec.Command("kubectl", "get", "configmap", "alpha-config",
-				"-n", targetNamespace)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "alpha-config should exist")
-
-			By("verifying beta-config ConfigMap exists")
-			cmd = exec.Command("kubectl", "get", "configmap", "beta-config",
-				"-n", targetNamespace)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "beta-config should exist (optional component selected)")
-
-			By("verifying both components are in componentStatuses")
-			cmd = exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
-				"-n", multiPkgNamespace,
-				"-o", "jsonpath={.status.componentStatuses[*].name}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("alpha"))
-			Expect(output).To(ContainSubstring("beta"))
+			deployAndAssertComponents(
+				"e2e-multi-all",
+				[]string{"alpha", "beta"},
+				[]string{"alpha-config", "beta-config"},
+				nil,
+				[]string{"alpha", "beta"},
+				nil,
+			)
 		})
 	})
 
@@ -849,6 +832,67 @@ spec:
 			varPkgNamespace = "default"
 			targetNamespace = "e2e-test-httpbin"
 		)
+
+		deployAndAssertVariables := func(
+			zarfPkgName string,
+			setValues []string,
+			expectedReplicas string,
+			expectedServicePort string,
+		) {
+			setYAML := ""
+			if len(setValues) > 0 {
+				setYAML = "\n  set:\n"
+				for _, setValue := range setValues {
+					setYAML += fmt.Sprintf("    - %q\n", setValue)
+				}
+			}
+
+			By(fmt.Sprintf("applying ZarfPackage %s", zarfPkgName))
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-httpbin:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true%s
+`, zarfPkgName, varPkgNamespace, registryURL, setYAML)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(zarfPkgYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the ZarfPackage reaches Deployed phase")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
+					"-n", varPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Deployed"))
+			}, 5*time.Minute).Should(Succeed())
+
+			By(fmt.Sprintf("verifying the httpbin deployment has %s replicas", expectedReplicas))
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "httpbin",
+					"-n", targetNamespace,
+					"-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(expectedReplicas))
+			}, 3*time.Minute).Should(Succeed())
+
+			By(fmt.Sprintf("verifying the httpbin service port is %s", expectedServicePort))
+			cmd = exec.Command("kubectl", "get", "service", "httpbin",
+				"-n", targetNamespace,
+				"-o", "jsonpath={.spec.ports[0].port}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal(expectedServicePort))
+		}
 
 		AfterEach(func() {
 			By("cleaning up httpbin ZarfPackage CRs")
@@ -865,110 +909,16 @@ spec:
 		})
 
 		It("should deploy with default variable values", func() {
-			const zarfPkgName = "e2e-httpbin-defaults"
-
-			By("applying a ZarfPackage CR with no spec.set")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
-kind: ZarfPackage
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  source: "oci://%s/e2e-test-httpbin:0.0.1"
-  plainHTTP: true
-  yolo: true
-  skipSignatureValidation: true
-`, zarfPkgName, varPkgNamespace, registryURL)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = utils.StringReader(zarfPkgYAML)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying the ZarfPackage reaches Deployed phase")
-			verifyDeployed := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
-					"-n", varPkgNamespace,
-					"-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Deployed"))
-			}
-			Eventually(verifyDeployed, 5*time.Minute).Should(Succeed())
-
-			By("verifying the httpbin deployment has 1 replica (default)")
-			verifyReplicas := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "httpbin",
-					"-n", targetNamespace,
-					"-o", "jsonpath={.spec.replicas}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("1"))
-			}
-			Eventually(verifyReplicas, 3*time.Minute).Should(Succeed())
-
-			By("verifying the httpbin service port is 8080 (default)")
-			cmd = exec.Command("kubectl", "get", "service", "httpbin",
-				"-n", targetNamespace,
-				"-o", "jsonpath={.spec.ports[0].port}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("8080"))
+			deployAndAssertVariables("e2e-httpbin-defaults", nil, "1", "8080")
 		})
 
 		It("should deploy with custom variable values via spec.set", func() {
-			const zarfPkgName = "e2e-httpbin-custom"
-
-			By("applying a ZarfPackage CR with spec.set overrides")
-			zarfPkgYAML := fmt.Sprintf(`apiVersion: ops.d0s.dev/v1alpha1
-kind: ZarfPackage
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  source: "oci://%s/e2e-test-httpbin:0.0.1"
-  plainHTTP: true
-  yolo: true
-  skipSignatureValidation: true
-  set:
-    - "REPLICAS=3"
-    - "SERVICE_PORT=9090"
-`, zarfPkgName, varPkgNamespace, registryURL)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = utils.StringReader(zarfPkgYAML)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying the ZarfPackage reaches Deployed phase")
-			verifyDeployed := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
-					"-n", varPkgNamespace,
-					"-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Deployed"))
-			}
-			Eventually(verifyDeployed, 5*time.Minute).Should(Succeed())
-
-			By("verifying the httpbin deployment has 3 replicas")
-			verifyReplicas := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "httpbin",
-					"-n", targetNamespace,
-					"-o", "jsonpath={.spec.replicas}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("3"))
-			}
-			Eventually(verifyReplicas, 3*time.Minute).Should(Succeed())
-
-			By("verifying the httpbin service port is 9090")
-			cmd = exec.Command("kubectl", "get", "service", "httpbin",
-				"-n", targetNamespace,
-				"-o", "jsonpath={.spec.ports[0].port}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("9090"))
+			deployAndAssertVariables(
+				"e2e-httpbin-custom",
+				[]string{"REPLICAS=3", "SERVICE_PORT=9090"},
+				"3",
+				"9090",
+			)
 		})
 
 		It("should redeploy when spec.set changes", func() {
