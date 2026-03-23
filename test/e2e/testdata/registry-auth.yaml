@@ -20,6 +20,9 @@ spec:
       labels:
         app: registry-auth
     spec:
+      # Prevent K8s from injecting REGISTRY_AUTH_* service env vars that
+      # collide with the registry:2 image's env-based config parser.
+      enableServiceLinks: false
       containers:
         - name: registry
           image: registry:2
