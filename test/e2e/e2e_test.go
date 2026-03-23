@@ -1196,6 +1196,7 @@ spec:
 				ContainSubstring("unauthorized"),
 				ContainSubstring("authentication required"),
 				ContainSubstring("401"),
+				ContainSubstring("basic credential not found"),
 			))
 		})
 	})
