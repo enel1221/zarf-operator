@@ -26,6 +26,7 @@ type DeployOptions struct {
 	InsecureSkipTLSVerify   bool
 	SkipVersionCheck        bool
 	YoloMode                bool
+	RegistryCredentialJSON  []byte
 }
 
 // DeployResult contains the result of a deployment

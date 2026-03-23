@@ -43,6 +43,7 @@ type DeployRequest struct {
 	InsecureSkipTlsVerify   bool                   `protobuf:"varint,17,opt,name=insecure_skip_tls_verify,json=insecureSkipTlsVerify,proto3" json:"insecure_skip_tls_verify,omitempty"`
 	SkipVersionCheck        bool                   `protobuf:"varint,18,opt,name=skip_version_check,json=skipVersionCheck,proto3" json:"skip_version_check,omitempty"`
 	YoloMode                bool                   `protobuf:"varint,19,opt,name=yolo_mode,json=yoloMode,proto3" json:"yolo_mode,omitempty"`
+	RegistryCredentialJson  []byte                 `protobuf:"bytes,20,opt,name=registry_credential_json,json=registryCredentialJson,proto3" json:"registry_credential_json,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -208,6 +209,13 @@ func (x *DeployRequest) GetYoloMode() bool {
 		return x.YoloMode
 	}
 	return false
+}
+
+func (x *DeployRequest) GetRegistryCredentialJson() []byte {
+	if x != nil {
+		return x.RegistryCredentialJson
+	}
+	return nil
 }
 
 type DeployResponse struct {
@@ -1034,7 +1042,7 @@ var File_zarf_v1_zarf_proto protoreflect.FileDescriptor
 
 const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\n" +
-	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xd2\x06\n" +
+	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\x8c\a\n" +
 	"\rDeployRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1e\n" +
 	"\n" +
@@ -1059,7 +1067,8 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"plain_http\x18\x10 \x01(\bR\tplainHttp\x127\n" +
 	"\x18insecure_skip_tls_verify\x18\x11 \x01(\bR\x15insecureSkipTlsVerify\x12,\n" +
 	"\x12skip_version_check\x18\x12 \x01(\bR\x10skipVersionCheck\x12\x1b\n" +
-	"\tyolo_mode\x18\x13 \x01(\bR\byoloMode\x1a?\n" +
+	"\tyolo_mode\x18\x13 \x01(\bR\byoloMode\x128\n" +
+	"\x18registry_credential_json\x18\x14 \x01(\fR\x16registryCredentialJson\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc0\x01\n" +

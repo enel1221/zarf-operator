@@ -6,3 +6,6 @@ nodes:
       - containerPort: 30500
         hostPort: 5001
         protocol: TCP
+      - containerPort: 30501
+        hostPort: 5002
+        protocol: TCP

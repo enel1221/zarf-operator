@@ -43,6 +43,10 @@ var (
 	// registryURL is the in-cluster registry address used in ZarfPackage CRs.
 	// The registry is deployed as a NodePort service in the e2e-registry namespace.
 	registryURL = "registry.e2e-registry.svc.cluster.local:5000"
+
+	// authRegistryURL is the in-cluster auth-protected registry address.
+	// Credentials: testuser / testpass (htpasswd-based basic auth).
+	authRegistryURL = "registry-auth.e2e-registry-auth.svc.cluster.local:5000"
 )
 
 // TestE2E runs the end-to-end (e2e) test suite for the project.

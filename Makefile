@@ -87,6 +87,8 @@ E2E_REGISTRY_NODEPORT ?= 30500
 E2E_REGISTRY_HOST_PORT ?= 5001
 E2E_IMG ?= example.com/zarf-operator:v0.0.1
 E2E_SIDECAR_IMG ?= example.com/zarf-operator-sidecar:v0.0.1
+E2E_AUTH_REGISTRY_NODEPORT ?= 30501
+E2E_AUTH_REGISTRY_HOST_PORT ?= 5002
 
 # All test package directories
 E2E_PKG_DIRS := test/e2e/testdata/packages/nginx \
@@ -119,7 +121,28 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 		echo "  Attempt $$i/30 - registry not ready, retrying in 2s..."; \
 		sleep 2; \
 	done
+	@echo "Setting up authenticated OCI registry..."
+	$(KUBECTL) apply -f test/e2e/testdata/registry-auth.yaml
+	@HTPASSWD=$$(docker run --rm --entrypoint htpasswd httpd:2-alpine -Bbn testuser testpass) && \
+		$(KUBECTL) create secret generic registry-htpasswd -n e2e-registry-auth \
+			--from-literal=htpasswd="$$HTPASSWD" --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) rollout status deployment/registry-auth -n e2e-registry-auth --timeout=120s
+	@echo "Waiting for auth registry to be reachable on localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)..."
+	@for i in $$(seq 1 30); do \
+		status=$$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)/v2/ 2>/dev/null || echo "000"); \
+		if [ "$$status" = "401" ]; then \
+			echo "Auth registry is ready (401 Unauthorized as expected)."; \
+			break; \
+		fi; \
+		if [ $$i -eq 30 ]; then \
+			echo "Error: Auth registry not reachable after 30 attempts."; \
+			exit 1; \
+		fi; \
+		echo "  Attempt $$i/30 - auth registry not ready (status=$$status), retrying in 2s..."; \
+		sleep 2; \
+	done
 	$(MAKE) e2e-publish-packages
+	$(MAKE) e2e-publish-auth-packages
 	@echo "E2E cluster setup complete."
 
 .PHONY: e2e-publish-packages
@@ -132,6 +155,15 @@ e2e-publish-packages: ## Build and publish all test Zarf packages to the in-clus
 		zarf package publish $$(ls /tmp/zarf-e2e-pkg/zarf-package-$$pkg_name-*.tar.zst) oci://localhost:$(E2E_REGISTRY_HOST_PORT) --plain-http; \
 		rm -rf /tmp/zarf-e2e-pkg/; \
 	done
+
+.PHONY: e2e-publish-auth-packages
+e2e-publish-auth-packages: ## Publish test package to auth-protected registry.
+	@echo "Publishing nginx package to auth-protected registry..."
+	@tmpdir=$$(mktemp -d) && \
+	echo '{"auths":{"localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)":{"auth":"'$$(printf 'testuser:testpass' | base64)'"}}}' > $$tmpdir/config.json && \
+	cd test/e2e/testdata/packages/nginx && zarf package create . --confirm --output /tmp/zarf-e2e-auth-pkg/ && cd - && \
+	DOCKER_CONFIG=$$tmpdir zarf package publish $$(ls /tmp/zarf-e2e-auth-pkg/zarf-package-e2e-test-nginx-*.tar.zst) oci://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT) --plain-http && \
+	rm -rf /tmp/zarf-e2e-auth-pkg/ $$tmpdir
 
 .PHONY: e2e-teardown
 e2e-teardown: ## Tear down the e2e Kind cluster.
@@ -164,6 +196,7 @@ e2e-rebuild: ## Rebuild and reload images + packages into existing cluster.
 	$(KIND) load docker-image $(E2E_IMG) --name $(E2E_KIND_CLUSTER)
 	$(KIND) load docker-image $(E2E_SIDECAR_IMG) --name $(E2E_KIND_CLUSTER)
 	$(MAKE) e2e-publish-packages
+	$(MAKE) e2e-publish-auth-packages
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

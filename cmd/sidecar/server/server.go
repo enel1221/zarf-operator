@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -126,6 +127,37 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		"timeout", req.Timeout.AsDuration(),
 		"ociConcurrency", req.OciConcurrency,
 	)
+
+	// Inject per-request registry credentials if provided.
+	// Writes a temp Docker config so Zarf's ORAS layer picks it up via $DOCKER_CONFIG.
+	if len(req.RegistryCredentialJson) > 0 {
+		tmpDir, err := os.MkdirTemp("", "zarf-docker-config-*")
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to create temp docker config dir: %v", err)
+		}
+		defer func() {
+			if err := os.RemoveAll(tmpDir); err != nil {
+				log.Warn("failed to remove temp docker config dir", "error", err)
+			}
+		}()
+
+		if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), req.RegistryCredentialJson, 0600); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to write temp docker config: %v", err)
+		}
+
+		origDockerConfig, hadEnv := os.LookupEnv("DOCKER_CONFIG")
+		if err := os.Setenv("DOCKER_CONFIG", tmpDir); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to set DOCKER_CONFIG: %v", err)
+		}
+		defer func() {
+			if hadEnv {
+				_ = os.Setenv("DOCKER_CONFIG", origDockerConfig)
+			} else {
+				_ = os.Unsetenv("DOCKER_CONFIG")
+			}
+		}()
+		log.Info("configured registry credentials from secret", "dockerConfigDir", tmpDir)
+	}
 
 	// Load the package
 	loadOpts := packager.LoadOptions{

@@ -20,40 +20,82 @@ Key capabilities:
 ## Quick Start
 
 ### Prerequisites
-- Kubernetes v1.25+
-- Helm v3.14+
-- (Optional) Zarf CLI for airgapped deployments
 
-### Install via Helm
+- Kubernetes v1.25+ cluster
+- `kubectl` configured to talk to your cluster
+- **Option A** requires [Helm](https://helm.sh) v3.14+
+- **Option B** requires the [Zarf](https://zarf.dev) CLI
 
-```bash
-helm install zarf-operator oci://ghcr.io/enel1221/charts/zarf-operator --version 0.1.0 \
-  --create-namespace --namespace zarf-operator-system
-```
+---
 
-### Install via Zarf (airgapped)
+### Option A — Install with Helm
 
 ```bash
-zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:0.1.0-amd64
+helm install zarf-operator oci://ghcr.io/enel1221/charts/zarf-operator \
+  --version 0.3.2 \
+  --create-namespace \
+  --namespace zarf-operator-system
 ```
 
-### Create a ZarfPackage
+### Option B — Install with Zarf (airgapped)
 
-```yaml
+```bash
+zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:0.3.2
+```
+
+> Replace `amd64` with `arm64` if deploying to an ARM cluster.
+
+---
+
+### Deploy Your First Package
+
+Once the operator is running, deploy a Zarf package by creating a `ZarfPackage` CR.
+
+#### Example 1 — Podinfo via Flux
+
+This deploys [podinfo](https://github.com/stefanprodan/podinfo) using Flux's Helm OCI integration, packaged as a Zarf package:
+
+```bash
+kubectl apply -f - <<'EOF'
 apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
 metadata:
-  name: my-package
+  name: podinfo
 spec:
-  source: "oci://ghcr.io/example/my-package:v1.0.0"
+  source: "oci://ghcr.io/enel1221/podinfo-flux/podinfo-flux:1.0.0"
   components:
-    - component-a
-  syncPolicy: Detect
+    - flux
+    - podinfo-via-flux-helm-oci
+  skipSignatureValidation: true
+EOF
 ```
 
+#### Example 2 — DOS Games Arcade
+
+A fun quick test — deploys a retro DOS games arcade into your cluster:
+
 ```bash
-kubectl apply -f my-package.yaml
+kubectl apply -f - <<'EOF'
+apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: dos-games
+spec:
+  source: "oci://ghcr.io/zarf-dev/packages/dos-games:1.2.0"
+  skipSignatureValidation: true
+EOF
+```
+
+#### Watch the deployment
+
+```bash
 kubectl get zarfpackages -w
+```
+
+To clean up:
+
+```bash
+kubectl delete zarfpackage podinfo dos-games
 ```
 
 ## Configuration Reference
@@ -75,6 +117,7 @@ kubectl get zarfpackages -w
 | `architecture` | string | | Target architecture override |
 | `skipSignatureValidation` | bool | false | Skip package signature check |
 | `insecureSkipTLSVerify` | bool | false | Skip TLS verification for OCI registry |
+| `registryCredentialSecretRef` | string | | Name of a `kubernetes.io/dockerconfigjson` Secret for private registry auth |
 
 ## Operations Guide
 
@@ -98,7 +141,55 @@ kubectl patch zarfpackage my-package --type merge -p '{"spec":{"suspend":false}}
 
 ### Force Redeploy
 
-Change any deployment-affecting field (source tag, components, etc.) or add/modify an annotation to trigger a new reconciliation.
+Annotate a `ZarfPackage` to trigger a redeploy without changing the spec. The controller detects the annotation, deploys the package, then automatically removes the annotation (no reconcile loop).
+
+```bash
+kubectl annotate zarfpackage my-package zarf.dev/redeploy=true --overwrite
+```
+
+### Registry Credentials
+
+To pull packages from private OCI registries, create a `kubernetes.io/dockerconfigjson` Secret and reference it:
+
+```bash
+kubectl create secret docker-registry private-registry-auth \
+  --docker-server=registry.example.com \
+  --docker-username=myuser \
+  --docker-password=mytoken \
+  -n zarf
+```
+
+```yaml
+apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: my-private-package
+  namespace: zarf
+spec:
+  source: "oci://registry.example.com/my-org/my-package:1.0.0"
+  registryCredentialSecretRef: private-registry-auth
+```
+
+The operator reads the Secret, passes the credentials to the sidecar over gRPC, and Zarf's OCI layer authenticates automatically. The Secret must exist in the same namespace as the ZarfPackage.
+
+The annotation value can be anything (`true`, a timestamp, etc.). After a successful deploy, the operator:
+1. Records a `RedeployRequested` event ("Redeploy triggered via annotation")
+2. Deploys the package
+3. Removes the `zarf.dev/redeploy` annotation
+4. Records a follow-up event ("Redeploy annotation cleared after successful deploy")
+
+You can also set the annotation directly in a manifest:
+
+```yaml
+apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: my-package
+  annotations:
+    zarf.dev/redeploy: "true"
+spec:
+  source: "oci://ghcr.io/example/my-package:1.0.0"
+```
 
 ### Troubleshooting
 

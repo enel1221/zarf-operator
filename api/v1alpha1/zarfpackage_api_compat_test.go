@@ -36,6 +36,7 @@ func TestAPICompatibilityGoldenFile(t *testing.T) {
 	assertEqual(t, "LogLevel", spec.LogLevel, "info")
 	assertEqual(t, "NoColor", spec.NoColor, true)
 	assertEqual(t, "OciConcurrency", spec.OciConcurrency, 6)
+	assertEqual(t, "RegistryCredentialSecretRef", spec.RegistryCredentialSecretRef, "my-registry-secret")
 	assertEqual(t, "SyncPolicy", string(spec.SyncPolicy), "Detect")
 	assertEqual(t, "Tmpdir", spec.Tmpdir, "/tmp/zarf")
 	assertEqual(t, "ZarfCache", spec.ZarfCache, "/cache")

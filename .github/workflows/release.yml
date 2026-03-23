@@ -128,7 +128,7 @@ jobs:
 
             ### Zarf (airgapped)
             ```
-            zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:${{ steps.meta.outputs.version }}-amd64
+            zarf package deploy oci://ghcr.io/enel1221/packages/zarf-operator:${{ steps.meta.outputs.version }}
             ```
           files: |
             dist/install.yaml

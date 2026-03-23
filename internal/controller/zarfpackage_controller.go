@@ -53,6 +53,7 @@ import (
 // Finalizer
 const (
 	ZarfPackageFinalizer = "zarfpackage.zarf.dev/finalizer"
+	AnnotationRedeploy   = "zarf.dev/redeploy"
 	DefaultRequeueAfter  = 5 * time.Minute
 	backoffBaseInterval  = 10 * time.Second
 	backoffMaxInterval   = 5 * time.Minute
@@ -73,6 +74,8 @@ const (
 	ReasonDriftResolved      = "DriftResolved"
 	ReasonSidecarUnavailable = "SidecarUnavailable"
 	ReasonMaxRetriesExceeded = "MaxRetriesExceeded"
+	ReasonRedeployRequested  = "RedeployRequested"
+	ReasonSecretNotFound     = "SecretNotFound"
 )
 
 // Error definitions
@@ -246,6 +249,15 @@ func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, 
 func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1alpha1.ZarfPackage, deployedPkg *zarf.PackageInfo) bool {
 	// Not deployed yet
 	if deployedPkg == nil {
+		return true
+	}
+
+	// Check for redeploy annotation
+	if _, ok := zarfPkg.Annotations[AnnotationRedeploy]; ok {
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonRedeployRequested,
+				"Redeploy triggered via annotation")
+		}
 		return true
 	}
 
@@ -474,6 +486,36 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 		YoloMode:                zarfPkg.Spec.Yolo,
 	}
 
+	// Resolve registry credentials from referenced Secret
+	if ref := zarfPkg.Spec.RegistryCredentialSecretRef; ref != "" {
+		var secret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: zarfPkg.Namespace, Name: ref}, &secret); err != nil {
+			log.Error(err, "failed to get registry credential secret", "secret", ref)
+			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+				ReasonSecretNotFound, fmt.Sprintf("Registry credential secret %q not found: %v", ref, err))
+			if r.recorder != nil {
+				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
+					fmt.Sprintf("Secret %q not found", ref))
+			}
+			return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
+		}
+		dockerCfg, ok := secret.Data[".dockerconfigjson"]
+		if !ok {
+			log.Error(nil, "registry credential secret missing .dockerconfigjson key", "secret", ref)
+			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+				ReasonSecretNotFound, fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
+			if r.recorder != nil {
+				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
+					fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
+			}
+			return ctrl.Result{}, nil
+		}
+		opts.RegistryCredentialJSON = dockerCfg
+		log.Info("resolved registry credentials from secret", "secret", ref)
+	}
+
 	result, err := r.ZarfClient.Deploy(ctx, opts)
 	if err != nil {
 		log.Error(err, "deployment failed")
@@ -519,6 +561,23 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 	if r.recorder != nil {
 		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonDeployed,
 			fmt.Sprintf("Package %s version %s deployed", result.PackageName, result.Version))
+	}
+
+	// Clear the redeploy annotation if present.
+	// Use a MergeFrom patch on metadata only — this does not bump .metadata.generation
+	// and will not re-trigger the reconcile loop.
+	if _, ok := zarfPkg.Annotations[AnnotationRedeploy]; ok {
+		patch := client.MergeFrom(zarfPkg.DeepCopy())
+		delete(zarfPkg.Annotations, AnnotationRedeploy)
+		if err := r.Patch(ctx, zarfPkg, patch); err != nil {
+			log.Error(err, "failed to clear redeploy annotation")
+			return ctrl.Result{}, err
+		}
+		log.Info("cleared redeploy annotation after successful deploy")
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonRedeployRequested,
+				"Redeploy annotation cleared after successful deploy")
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil

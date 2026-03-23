@@ -46,6 +46,7 @@ message DeployRequest {
     bool insecure_skip_tls_verify = 17;
     bool skip_version_check = 18;
     bool yolo_mode = 19;
+    bytes registry_credential_json = 20;
 }
 
 message DeployResponse {

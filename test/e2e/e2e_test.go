@@ -998,6 +998,207 @@ spec:
 			Eventually(verifyReplicas, 3*time.Minute).Should(Succeed())
 		})
 	})
+
+	Context("Registry Authentication", func() {
+		const (
+			authPkgNamespace = "default"
+			authTargetNs     = "e2e-test-nginx"
+			authSecretName   = "e2e-auth-registry-cred"
+		)
+
+		AfterEach(func() {
+			By("cleaning up registry auth test resources")
+			for _, name := range []string{"e2e-auth-deploy", "e2e-auth-nosecret", "e2e-auth-nocreds"} {
+				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+					"-n", authPkgNamespace, "--ignore-not-found=true", "--timeout=120s")
+				_, _ = utils.Run(cmd)
+			}
+			cmd := exec.Command("kubectl", "delete", "secret", authSecretName,
+				"-n", authPkgNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "ns", authTargetNs,
+				"--ignore-not-found=true", "--timeout=60s")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should deploy from an auth-protected registry with valid credentials", func() {
+			By("creating a dockerconfigjson Secret with valid credentials")
+			cmd := exec.Command("kubectl", "create", "secret", "docker-registry", authSecretName,
+				"--docker-server="+authRegistryURL,
+				"--docker-username=testuser",
+				"--docker-password=testpass",
+				"-n", authPkgNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create auth secret")
+
+			By("applying a ZarfPackage CR with registryCredentialSecretRef")
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: e2e-auth-deploy
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  registryCredentialSecretRef: %s
+`, authPkgNamespace, authRegistryURL, authSecretName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(zarfPkgYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the ZarfPackage reaches Deployed phase")
+			verifyDeployed := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-deploy",
+					"-n", authPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Deployed"))
+			}
+			Eventually(verifyDeployed, 5*time.Minute).Should(Succeed())
+
+			By("verifying the nginx deployment exists in the target namespace")
+			verifyNginxDeployment := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "nginx-test",
+					"-n", authTargetNs,
+					"-o", "jsonpath={.status.availableReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}
+			Eventually(verifyNginxDeployment, 3*time.Minute).Should(Succeed())
+
+			By("verifying the Ready condition is True")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-deploy",
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("True"))
+		})
+
+		It("should fail with SecretNotFound when the referenced Secret does not exist", func() {
+			By("applying a ZarfPackage CR referencing a non-existent secret")
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: e2e-auth-nosecret
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  registryCredentialSecretRef: nonexistent-secret
+`, authPkgNamespace, authRegistryURL)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(zarfPkgYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the ZarfPackage transitions to Failed phase")
+			verifyFailed := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nosecret",
+					"-n", authPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Failed"))
+			}
+			Eventually(verifyFailed, 2*time.Minute).Should(Succeed())
+
+			By("verifying the Ready condition shows SecretNotFound")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nosecret",
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("SecretNotFound"))
+
+			By("verifying the Ready condition message mentions the secret name")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nosecret",
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].message}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("nonexistent-secret"))
+
+			By("verifying a SecretNotFound event was emitted")
+			verifyEvent := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "events",
+					"-n", authPkgNamespace,
+					"--field-selector", "involvedObject.name=e2e-auth-nosecret,reason=SecretNotFound",
+					"-o", "jsonpath={.items[0].message}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("nonexistent-secret"))
+			}
+			Eventually(verifyEvent, 30*time.Second).Should(Succeed())
+		})
+
+		It("should fail to pull from an auth-protected registry without credentials", func() {
+			By("applying a ZarfPackage CR without registryCredentialSecretRef")
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: e2e-auth-nocreds
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, authPkgNamespace, authRegistryURL)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(zarfPkgYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the ZarfPackage transitions to Failed phase")
+			verifyFailed := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nocreds",
+					"-n", authPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Failed"))
+			}
+			Eventually(verifyFailed, 2*time.Minute).Should(Succeed())
+
+			By("verifying the Ready condition is False with DeployFailed reason")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nocreds",
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("False"))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nocreds",
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].reason}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("DeployFailed"))
+
+			By("verifying the error message indicates an authentication failure")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", "e2e-auth-nocreds",
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].message}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(SatisfyAny(
+				ContainSubstring("unauthorized"),
+				ContainSubstring("authentication required"),
+				ContainSubstring("401"),
+			))
+		})
+	})
 })
 
 // serviceAccountToken returns a token for the specified service account.

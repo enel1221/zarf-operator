@@ -134,6 +134,13 @@ type ZarfPackageSpec struct {
 	// +optional
 	PlainHTTP bool `json:"plainHTTP,omitempty"`
 
+	// RegistryCredentialSecretRef is the name of a kubernetes.io/dockerconfigjson Secret
+	// in the same namespace as the ZarfPackage. The controller reads the Secret's
+	// .dockerconfigjson key and injects it as the Docker credential store for the
+	// OCI pull, so the sidecar can authenticate to private registries.
+	// +optional
+	RegistryCredentialSecretRef string `json:"registryCredentialSecretRef,omitempty"`
+
 	// Tmpdir is the temporary directory for the Zarf package.
 	// +optional
 	Tmpdir string `json:"tmpdir,omitempty"`

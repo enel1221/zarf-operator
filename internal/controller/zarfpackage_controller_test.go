@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -439,6 +440,95 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(deployCalled).To(Equal(1))
 		})
+
+		It("should redeploy when redeploy annotation is set and clear it after deploy", func() {
+			nn := createResource("redeploy-annotation-pkg", true, "oci://example.com/pkg:v1")
+
+			// First reconcile to deploy and establish baseline
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: "v1", Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: deployCalled}, nil
+				})
+
+			rec := record.NewFakeRecorder(100)
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				Log:             logr.Discard(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				recorder:        rec,
+			}
+
+			// Initial deploy
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1))
+
+			// Verify it's deployed and in sync (no redeploy on next reconcile)
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1)) // still 1
+
+			// Now add the redeploy annotation
+			obj := getResource(nn)
+			if obj.Annotations == nil {
+				obj.Annotations = map[string]string{}
+			}
+			obj.Annotations[AnnotationRedeploy] = "true"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			// Reconcile should trigger deploy
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(2))
+			expectEventReason(rec, ReasonRedeployRequested)
+
+			// Annotation should be cleared
+			updated := getResource(nn)
+			_, hasAnnotation := updated.Annotations[AnnotationRedeploy]
+			Expect(hasAnnotation).To(BeFalse(), "redeploy annotation should be cleared after deploy")
+		})
+
+		It("should not enter a reconcile loop after clearing the redeploy annotation", func() {
+			nn := createResource("redeploy-no-loop-pkg", true, "oci://example.com/pkg:v1")
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: "v1", Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: deployCalled}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+
+			// Initial deploy
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1))
+
+			// Add redeploy annotation
+			obj := getResource(nn)
+			if obj.Annotations == nil {
+				obj.Annotations = map[string]string{}
+			}
+			obj.Annotations[AnnotationRedeploy] = "1234567890"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			// Reconcile triggers redeploy and clears annotation
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(2))
+
+			// Next reconcile should NOT redeploy — annotation is gone
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(2), "should not redeploy again after annotation was cleared")
+		})
 	})
 
 	Context("Deletion behavior", func() {
@@ -615,6 +705,60 @@ var _ = Describe("ZarfPackage Controller", func() {
 			suspended := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeSuspended)
 			Expect(suspended).NotTo(BeNil())
 			Expect(suspended.Status).To(Equal(metav1.ConditionFalse))
+		})
+	})
+
+	Context("Registry credential behavior", func() {
+		It("should pass registry credentials from a referenced Secret to deploy opts", func() {
+			// Create dockerconfigjson secret
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "reg-cred", Namespace: "default"},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{"ghcr.io":{"auth":"dGVzdA=="}}}`)},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("reg-cred-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.RegistryCredentialSecretRef = "reg-cred"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.RegistryCredentialJSON).To(Equal([]byte(`{"auths":{"ghcr.io":{"auth":"dGVzdA=="}}}`)))
+		})
+
+		It("should fail when the referenced registry credential Secret does not exist", func() {
+			nn := createResource("reg-missing-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.RegistryCredentialSecretRef = "nonexistent-secret"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonSecretNotFound)
 		})
 	})
 })

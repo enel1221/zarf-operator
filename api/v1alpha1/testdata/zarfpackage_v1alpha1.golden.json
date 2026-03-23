@@ -26,6 +26,7 @@
     "noColor": true,
     "ociConcurrency": 6,
     "plainHTTP": false,
+    "registryCredentialSecretRef": "my-registry-secret",
     "tmpdir": "/tmp/zarf",
     "zarfCache": "/cache",
     "syncPolicy": "Detect",
