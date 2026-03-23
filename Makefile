@@ -122,11 +122,19 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 		sleep 2; \
 	done
 	@echo "Setting up authenticated OCI registry..."
-	$(KUBECTL) apply -f test/e2e/testdata/registry-auth.yaml
+	$(KUBECTL) create namespace e2e-registry-auth --dry-run=client -o yaml | $(KUBECTL) apply -f -
 	@HTPASSWD=$$(docker run --rm --entrypoint htpasswd httpd:2-alpine -Bbn testuser testpass) && \
 		$(KUBECTL) create secret generic registry-htpasswd -n e2e-registry-auth \
 			--from-literal=htpasswd="$$HTPASSWD" --dry-run=client -o yaml | $(KUBECTL) apply -f -
-	$(KUBECTL) rollout status deployment/registry-auth -n e2e-registry-auth --timeout=120s
+	$(KUBECTL) apply -f test/e2e/testdata/registry-auth.yaml
+	@$(KUBECTL) rollout status deployment/registry-auth -n e2e-registry-auth --timeout=180s || { \
+		echo "Auth registry rollout failed; dumping diagnostics..."; \
+		$(KUBECTL) get pods -n e2e-registry-auth -o wide; \
+		$(KUBECTL) describe deployment/registry-auth -n e2e-registry-auth; \
+		$(KUBECTL) describe pods -n e2e-registry-auth; \
+		$(KUBECTL) logs deployment/registry-auth -n e2e-registry-auth --all-containers=true --tail=200 || true; \
+		exit 1; \
+	}
 	@echo "Waiting for auth registry to be reachable on localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)..."
 	@for i in $$(seq 1 30); do \
 		status=$$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)/v2/ 2>/dev/null || echo "000"); \
