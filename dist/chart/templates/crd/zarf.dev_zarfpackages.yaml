@@ -119,6 +119,13 @@ spec:
                 description: PlainHTTP indicates whether to use plain HTTP instead
                   of HTTPS for the Zarf package.
                 type: boolean
+              registryCredentialSecretRef:
+                description: |-
+                  RegistryCredentialSecretRef is the name of a kubernetes.io/dockerconfigjson Secret
+                  in the same namespace as the ZarfPackage. The controller reads the Secret's
+                  .dockerconfigjson key and injects it as the Docker credential store for the
+                  OCI pull, so the sidecar can authenticate to private registries.
+                type: string
               retries:
                 description: Retries is the number of times to retry deploying the
                   Zarf package in case of failure.
