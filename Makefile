@@ -137,7 +137,7 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 	}
 	@echo "Waiting for auth registry to be reachable on localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)..."
 	@for i in $$(seq 1 30); do \
-		status=$$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)/v2/ 2>/dev/null || echo "000"); \
+		status=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)/v2/ 2>/dev/null || echo "000"); \
 		if [ "$$status" = "401" ]; then \
 			echo "Auth registry is ready (401 Unauthorized as expected)."; \
 			break; \
