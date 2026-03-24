@@ -95,6 +95,7 @@ const (
 	ReasonMaxRetriesExceeded = "MaxRetriesExceeded"
 	ReasonRedeployRequested  = "RedeployRequested"
 	ReasonSecretNotFound     = "SecretNotFound"
+	ReasonHelmDebugLogs      = "HelmDebugLogs"
 	ReasonStalled            = "Stalled"
 )
 
@@ -196,6 +197,9 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			zarfPkg.Status.ObservedGeneration = zarfPkg.Generation
 
 			if updateErr := r.Status().Patch(ctx, zarfPkg, client.MergeFrom(original)); updateErr != nil {
+				if apierrors.IsNotFound(updateErr) {
+					return
+				}
 				if apierrors.IsConflict(updateErr) {
 					log.V(1).Info("conflict while updating status, will requeue")
 					if err == nil {
@@ -216,7 +220,7 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Handle deletion
 	if !zarfPkg.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, log, zarfPkg, zarfClient)
+		return r.handleDeletion(ctx, log, zarfPkg, zarfClient, original)
 	}
 
 	// Add finalizer if not present
@@ -581,6 +585,7 @@ func (r *ZarfPackageReconciler) deploy(
 		PlainHTTP:               zarfPkg.Spec.PlainHTTP,
 		InsecureSkipTLSVerify:   zarfPkg.Spec.InsecureSkipTLSVerify,
 		YoloMode:                zarfPkg.Spec.Yolo,
+		HelmDebugEnabled:        zarfPkg.Spec.HelmDebugEnabled,
 	}
 
 	// Resolve registry credentials from referenced Secret
@@ -676,6 +681,10 @@ func (r *ZarfPackageReconciler) deploy(
 	}
 	r.observeDeployDuration(deployStart, "success")
 	r.applyDeploySuccessStatus(zarfPkg, result)
+	if r.recorder != nil && zarfPkg.Spec.HelmDebugEnabled && len(result.DeployLogs) > 0 {
+		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonHelmDebugLogs,
+			formatLogSummary(result.DeployLogs, 1024))
+	}
 
 	// Clear the redeploy annotation if present.
 	// Use a MergeFrom patch on metadata only — this does not bump .metadata.generation
@@ -697,7 +706,13 @@ func (r *ZarfPackageReconciler) deploy(
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
 }
 
-func (r *ZarfPackageReconciler) handleDeletion(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage, zarfClient zarf.Client) (ctrl.Result, error) {
+func (r *ZarfPackageReconciler) handleDeletion(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	zarfClient zarf.Client,
+	original *opsv1alpha1.ZarfPackage,
+) (ctrl.Result, error) {
 	ctx, span := tracer.Start(ctx, "HandleDeletion", trace.WithAttributes(
 		attribute.String("package", zarfPkg.Status.PackageName),
 	))
@@ -708,9 +723,19 @@ func (r *ZarfPackageReconciler) handleDeletion(ctx context.Context, log logr.Log
 	}
 
 	log.Info("removing package", "package", zarfPkg.Status.PackageName)
+	statusPatch := client.MergeFrom(zarfPkg.DeepCopy())
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseRemoving
 	if r.recorder != nil {
 		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonRemoving, "Removing package")
+	}
+	// Persist the Removing phase before finalizer removal so observers can see deletion progress.
+	if err := r.Status().Patch(ctx, zarfPkg, statusPatch); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+	if original != nil {
+		original.Status = zarfPkg.Status
 	}
 
 	if zarfPkg.Status.PackageName != "" && zarfClient != nil {
@@ -1253,7 +1278,7 @@ func (r *ZarfPackageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	dependencyPhasePredicate := predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return false },
-		DeleteFunc:  func(_ event.DeleteEvent) bool { return false },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldObj, oldOK := e.ObjectOld.(*opsv1alpha1.ZarfPackage)

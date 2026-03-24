@@ -44,6 +44,7 @@ type DeployRequest struct {
 	SkipVersionCheck        bool                   `protobuf:"varint,18,opt,name=skip_version_check,json=skipVersionCheck,proto3" json:"skip_version_check,omitempty"`
 	YoloMode                bool                   `protobuf:"varint,19,opt,name=yolo_mode,json=yoloMode,proto3" json:"yolo_mode,omitempty"`
 	RegistryCredentialJson  []byte                 `protobuf:"bytes,20,opt,name=registry_credential_json,json=registryCredentialJson,proto3" json:"registry_credential_json,omitempty"`
+	HelmDebugEnabled        bool                   `protobuf:"varint,21,opt,name=helm_debug_enabled,json=helmDebugEnabled,proto3" json:"helm_debug_enabled,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -218,12 +219,20 @@ func (x *DeployRequest) GetRegistryCredentialJson() []byte {
 	return nil
 }
 
+func (x *DeployRequest) GetHelmDebugEnabled() bool {
+	if x != nil {
+		return x.HelmDebugEnabled
+	}
+	return false
+}
+
 type DeployResponse struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	PackageName        string                 `protobuf:"bytes,1,opt,name=package_name,json=packageName,proto3" json:"package_name,omitempty"`
 	Version            string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
 	Generation         int32                  `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
 	DeployedComponents []*DeployedComponent   `protobuf:"bytes,4,rep,name=deployed_components,json=deployedComponents,proto3" json:"deployed_components,omitempty"`
+	DeployLogs         []string               `protobuf:"bytes,6,rep,name=deploy_logs,json=deployLogs,proto3" json:"deploy_logs,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -282,6 +291,13 @@ func (x *DeployResponse) GetGeneration() int32 {
 func (x *DeployResponse) GetDeployedComponents() []*DeployedComponent {
 	if x != nil {
 		return x.DeployedComponents
+	}
+	return nil
+}
+
+func (x *DeployResponse) GetDeployLogs() []string {
+	if x != nil {
+		return x.DeployLogs
 	}
 	return nil
 }
@@ -1110,7 +1126,7 @@ var File_zarf_v1_zarf_proto protoreflect.FileDescriptor
 
 const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\n" +
-	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\x8c\a\n" +
+	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xba\a\n" +
 	"\rDeployRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1e\n" +
 	"\n" +
@@ -1136,17 +1152,20 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\x18insecure_skip_tls_verify\x18\x11 \x01(\bR\x15insecureSkipTlsVerify\x12,\n" +
 	"\x12skip_version_check\x18\x12 \x01(\bR\x10skipVersionCheck\x12\x1b\n" +
 	"\tyolo_mode\x18\x13 \x01(\bR\byoloMode\x128\n" +
-	"\x18registry_credential_json\x18\x14 \x01(\fR\x16registryCredentialJson\x1a?\n" +
+	"\x18registry_credential_json\x18\x14 \x01(\fR\x16registryCredentialJson\x12,\n" +
+	"\x12helm_debug_enabled\x18\x15 \x01(\bR\x10helmDebugEnabled\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe1\x01\n" +
 	"\x0eDeployResponse\x12!\n" +
 	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x03 \x01(\x05R\n" +
 	"generation\x12K\n" +
-	"\x13deployed_components\x18\x04 \x03(\v2\x1a.zarf.v1.DeployedComponentR\x12deployedComponentsJ\x04\b\x05\x10\x06\"\xa7\x01\n" +
+	"\x13deployed_components\x18\x04 \x03(\v2\x1a.zarf.v1.DeployedComponentR\x12deployedComponents\x12\x1f\n" +
+	"\vdeploy_logs\x18\x06 \x03(\tR\n" +
+	"deployLogsJ\x04\b\x05\x10\x06\"\xa7\x01\n" +
 	"\x11DeployErrorDetail\x12)\n" +
 	"\x10failed_component\x18\x01 \x01(\tR\x0ffailedComponent\x12!\n" +
 	"\ffailed_chart\x18\x02 \x01(\tR\vfailedChart\x12#\n" +

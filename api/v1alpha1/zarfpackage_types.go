@@ -138,6 +138,11 @@ type ZarfPackageSpec struct {
 	// +optional
 	LogLevel string `json:"logLevel,omitempty"`
 
+	// HelmDebugEnabled forces Helm debug logs to be captured for this package deployment.
+	// +optional
+	// +kubebuilder:default=false
+	HelmDebugEnabled bool `json:"helmDebugEnabled,omitempty"`
+
 	// NoColor indicates whether to disable colored output in logs.
 	// +optional
 	NoColor bool `json:"noColor,omitempty"`

@@ -933,7 +933,282 @@ var _ = Describe("ZarfPackage Controller", func() {
 		})
 	})
 
+	Context("DependsOn chain lifecycle", func() {
+		It("should deploy a four-package dependsOn chain in order", func() {
+			chainA := createResource("chain-order-a", true, "oci://example.com/chain-a:v1")
+			chainB := createResource("chain-order-b", true, "oci://example.com/chain-b:v1")
+			chainC := createResource("chain-order-c", true, "oci://example.com/chain-c:v1")
+			chainD := createResource("chain-order-d", true, "oci://example.com/chain-d:v1")
+
+			chainBObj := getResource(chainB)
+			chainBObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-order-a"}}
+			Expect(k8sClient.Update(ctx, chainBObj)).To(Succeed())
+
+			chainCObj := getResource(chainC)
+			chainCObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-order-b"}}
+			Expect(k8sClient.Update(ctx, chainCObj)).To(Succeed())
+
+			chainDObj := getResource(chainD)
+			chainDObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-order-c"}}
+			Expect(k8sClient.Update(ctx, chainDObj)).To(Succeed())
+
+			deployOrder := make([]string, 0, 4)
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployOrder = append(deployOrder, opts.Source)
+				return &zarf.DeployResult{
+					PackageName: opts.Source,
+					Version:     "v1",
+					Generation:  len(deployOrder),
+				}, nil
+			})
+			reconciler := newReconciler(fakeZarf)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainB})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainC})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainD})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainA})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainB})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainC})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: chainD})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(deployOrder).To(Equal([]string{
+				"oci://example.com/chain-a:v1",
+				"oci://example.com/chain-b:v1",
+				"oci://example.com/chain-c:v1",
+				"oci://example.com/chain-d:v1",
+			}))
+
+			for _, nn := range []types.NamespacedName{chainA, chainB, chainC, chainD} {
+				updated := getResource(nn)
+				Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+				deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+				if nn != chainA {
+					Expect(deps).NotTo(BeNil())
+					Expect(deps.Status).To(Equal(metav1.ConditionTrue))
+					Expect(deps.Reason).To(Equal(opsv1alpha1.ReasonDependenciesMet))
+				}
+			}
+		})
+
+		It("should show Pending phase and DependenciesNotMet when chain is incomplete", func() {
+			_ = createResource("chain-incomplete-a", true, "oci://example.com/chain-incomplete-a:v1")
+			chainB := createResource("chain-incomplete-b", true, "oci://example.com/chain-incomplete-b:v1")
+			chainC := createResource("chain-incomplete-c", true, "oci://example.com/chain-incomplete-c:v1")
+			chainD := createResource("chain-incomplete-d", true, "oci://example.com/chain-incomplete-d:v1")
+
+			chainBObj := getResource(chainB)
+			chainBObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-incomplete-a"}}
+			Expect(k8sClient.Update(ctx, chainBObj)).To(Succeed())
+
+			chainCObj := getResource(chainC)
+			chainCObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-incomplete-b"}}
+			Expect(k8sClient.Update(ctx, chainCObj)).To(Succeed())
+
+			chainDObj := getResource(chainD)
+			chainDObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-incomplete-c"}}
+			Expect(k8sClient.Update(ctx, chainDObj)).To(Succeed())
+
+			deployCalled := 0
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			for _, nn := range []types.NamespacedName{chainB, chainC, chainD} {
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+
+				updated := getResource(nn)
+				Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhasePending))
+				deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+				Expect(deps).NotTo(BeNil())
+				Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+				Expect(deps.Reason).To(Equal(opsv1alpha1.ReasonDependenciesNotMet))
+			}
+
+			Expect(deployCalled).To(Equal(0))
+		})
+
+		It("should delete entire chain and clear all finalizers", func() {
+			chainA := createResource("chain-delete-a", true, "oci://example.com/chain-delete-a:v1")
+			chainB := createResource("chain-delete-b", true, "oci://example.com/chain-delete-b:v1")
+			chainC := createResource("chain-delete-c", true, "oci://example.com/chain-delete-c:v1")
+			chainD := createResource("chain-delete-d", true, "oci://example.com/chain-delete-d:v1")
+
+			chainBObj := getResource(chainB)
+			chainBObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-delete-a"}}
+			Expect(k8sClient.Update(ctx, chainBObj)).To(Succeed())
+			chainCObj := getResource(chainC)
+			chainCObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-delete-b"}}
+			Expect(k8sClient.Update(ctx, chainCObj)).To(Succeed())
+			chainDObj := getResource(chainD)
+			chainDObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-delete-c"}}
+			Expect(k8sClient.Update(ctx, chainDObj)).To(Succeed())
+
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				return &zarf.DeployResult{
+					PackageName: opts.Source,
+					Version:     "v1",
+					Generation:  1,
+				}, nil
+			})
+			reconciler := newReconciler(fakeZarf)
+
+			for _, nn := range []types.NamespacedName{chainA, chainB, chainC, chainD} {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			for _, nn := range []types.NamespacedName{chainB, chainC, chainD} {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			removeCalled := 0
+			fakeZarf.RemoveFn = func(_ context.Context, _ zarf.RemoveOptions) error {
+				removeCalled++
+				return nil
+			}
+
+			for _, nn := range []types.NamespacedName{chainD, chainC, chainB, chainA} {
+				obj := getResource(nn)
+				Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Eventually(func() bool {
+				for _, nn := range []types.NamespacedName{chainA, chainB, chainC, chainD} {
+					lookup := &opsv1alpha1.ZarfPackage{}
+					err := k8sClient.Get(ctx, nn, lookup)
+					if !errors.IsNotFound(err) {
+						return false
+					}
+				}
+				return true
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+			Expect(removeCalled).To(Equal(4))
+		})
+
+		It("should re-queue dependents when dependency is deleted", func() {
+			dependencyNN := createResource("chain-delete-trigger-source", false, "oci://example.com/chain-delete-trigger-source:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			dependentNN := createResource("chain-delete-trigger-dependent", true, "oci://example.com/chain-delete-trigger-dependent:v1")
+			dependentObj := getResource(dependentNN)
+			dependentObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-delete-trigger-source"}}
+			Expect(k8sClient.Update(ctx, dependentObj)).To(Succeed())
+
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: dependentNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			dependentAfterDeploy := getResource(dependentNN)
+			Expect(dependentAfterDeploy.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+
+			Expect(k8sClient.Delete(ctx, dependencyObj)).To(Succeed())
+			Eventually(func() bool {
+				lookup := &opsv1alpha1.ZarfPackage{}
+				err := k8sClient.Get(ctx, dependencyNN, lookup)
+				return errors.IsNotFound(err)
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: dependentNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+
+			dependentUpdated := getResource(dependentNN)
+			Expect(dependentUpdated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhasePending))
+			deps := findCondition(dependentUpdated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+			Expect(deps.Reason).To(Equal(opsv1alpha1.ReasonDependenciesNotMet))
+		})
+
+		It("should delete dependent package while dependency is still deployed", func() {
+			dependencyNN := createResource("chain-delete-dependent-source", true, "oci://example.com/chain-delete-dependent-source:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			dependentNN := createResource("chain-delete-dependent-target", true, "oci://example.com/chain-delete-dependent-target:v1")
+			dependentObj := getResource(dependentNN)
+			dependentObj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "chain-delete-dependent-source"}}
+			Expect(k8sClient.Update(ctx, dependentObj)).To(Succeed())
+
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				return &zarf.DeployResult{PackageName: opts.Source, Version: "v1", Generation: 1}, nil
+			})
+			reconciler := newReconciler(fakeZarf)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: dependentNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			removeCalled := 0
+			fakeZarf.RemoveFn = func(_ context.Context, _ zarf.RemoveOptions) error {
+				removeCalled++
+				return nil
+			}
+
+			dependentObj = getResource(dependentNN)
+			Expect(k8sClient.Delete(ctx, dependentObj)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: dependentNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() bool {
+				lookup := &opsv1alpha1.ZarfPackage{}
+				err := k8sClient.Get(ctx, dependentNN, lookup)
+				return errors.IsNotFound(err)
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+			Expect(removeCalled).To(Equal(1))
+
+			dependencyUpdated := getResource(dependencyNN)
+			Expect(dependencyUpdated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+		})
+	})
+
 	Context("Deletion behavior", func() {
+		It("should persist Removing phase before finalizer removal", func() {
+			nn := createResource("delete-removing-phase-pkg", true, "oci://example.com/pkg:v1")
+
+			obj := getResource(nn)
+			obj.Status.PackageName = packageNameToRemove
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			observedRemovingPhase := opsv1alpha1.ZarfPackagePhase("")
+			fakeZarf := fake.New()
+			fakeZarf.RemoveFn = func(_ context.Context, _ zarf.RemoveOptions) error {
+				current := &opsv1alpha1.ZarfPackage{}
+				Expect(k8sClient.Get(ctx, nn, current)).To(Succeed())
+				observedRemovingPhase = current.Status.Phase
+				return status.Error(codes.Unavailable, "hold deletion for status verification")
+			}
+			reconciler := newReconciler(fakeZarf)
+
+			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(observedRemovingPhase).To(Equal(opsv1alpha1.ZarfPackagePhaseRemoving))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseRemoving))
+			Expect(controllerutil.ContainsFinalizer(updated, ZarfPackageFinalizer)).To(BeTrue())
+		})
+
 		It("should remove package and clear finalizer on deletion", func() {
 			nn := createResource("delete-success-pkg", true, "oci://example.com/pkg:v1")
 

@@ -95,6 +95,11 @@ spec:
                 items:
                   type: string
                 type: array
+              helmDebugEnabled:
+                default: false
+                description: HelmDebugEnabled forces Helm debug logs to be captured
+                  for this package deployment.
+                type: boolean
               insecureSkipTLSVerify:
                 description: InsecureSkipTLSVerify indicates whether to skip TLS verification
                   for the Zarf package.

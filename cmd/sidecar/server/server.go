@@ -66,6 +66,14 @@ func (s *ZarfServer) loggerForRequest(ctx context.Context, req *zarfv1.DeployReq
 				cfg.Level = level
 			}
 		}
+		if req.HelmDebugEnabled {
+			debugLevel, err := logger.ParseLevel("debug")
+			if err != nil {
+				s.baseLogger.Warn("failed to parse debug log level", "error", err)
+			} else if debugLevel < cfg.Level {
+				cfg.Level = debugLevel
+			}
+		}
 		if req.LogFormat != "" {
 			cfg.Format = logger.Format(req.LogFormat)
 		}
@@ -95,7 +103,7 @@ func (s *ZarfServer) baseLoggerWithContext(ctx context.Context) (*slog.Logger, c
 
 func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*zarfv1.DeployResponse, error) {
 	log, ctx := s.loggerForRequest(ctx, req)
-	capture := newCapturingHandler(log.Handler(), 50)
+	capture := newCapturingHandler(log.Handler(), 200)
 	captureLog := slog.New(capture)
 	ctx = logger.WithContext(ctx, captureLog)
 
@@ -302,6 +310,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		Version:            pkgLayout.Pkg.Metadata.Version,
 		Generation:         1, // Will be set from cluster state
 		DeployedComponents: components,
+		DeployLogs:         capture.Lines(),
 	}, nil
 }
 

@@ -95,6 +95,7 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		SkipVersionCheck:        opts.SkipVersionCheck,
 		YoloMode:                opts.YoloMode,
 		RegistryCredentialJson:  opts.RegistryCredentialJSON,
+		HelmDebugEnabled:        opts.HelmDebugEnabled,
 	}
 
 	resp, err := c.client.Deploy(ctx, req)
@@ -119,6 +120,7 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		Version:            resp.Version,
 		Generation:         int(resp.Generation),
 		DeployedComponents: convertComponents(resp.DeployedComponents),
+		DeployLogs:         append([]string{}, resp.DeployLogs...),
 	}, nil
 }
 

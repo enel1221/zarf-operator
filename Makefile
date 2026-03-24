@@ -183,8 +183,8 @@ e2e-publish-auth-packages: ## Publish test package to auth-protected registry.
 	DOCKER_CONFIG=$$tmpdir zarf package publish $$(ls /tmp/zarf-e2e-auth-pkg/zarf-package-e2e-test-nginx-*.tar.zst) oci://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT) --plain-http && \
 	rm -rf /tmp/zarf-e2e-auth-pkg/ $$tmpdir
 
-.PHONY: e2e-teardown
-e2e-teardown: ## Tear down the e2e Kind cluster.
+.PHONY: e2e-clean
+e2e-clean: ## Tear down the e2e Kind cluster.
 	$(KIND) delete cluster --name $(E2E_KIND_CLUSTER) || true
 
 .PHONY: test-e2e
@@ -201,7 +201,7 @@ test-e2e-fresh: manifests generate fmt vet ## Full cluster teardown, rebuild ima
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	$(MAKE) e2e-teardown
+	$(MAKE) e2e-clean
 	$(MAKE) docker-build IMG=$(E2E_IMG)
 	$(MAKE) docker-build-sidecar SIDECAR_IMG=$(E2E_SIDECAR_IMG)
 	$(MAKE) e2e-setup IMG=$(E2E_IMG) SIDECAR_IMG=$(E2E_SIDECAR_IMG)

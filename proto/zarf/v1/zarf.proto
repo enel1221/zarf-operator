@@ -47,6 +47,7 @@ message DeployRequest {
     bool skip_version_check = 18;
     bool yolo_mode = 19;
     bytes registry_credential_json = 20;
+    bool helm_debug_enabled = 21;
 }
 
 message DeployResponse {
@@ -55,6 +56,7 @@ message DeployResponse {
     int32 generation = 3;
     repeated DeployedComponent deployed_components = 4;
     reserved 5;
+    repeated string deploy_logs = 6;
 }
 
 message DeployErrorDetail {

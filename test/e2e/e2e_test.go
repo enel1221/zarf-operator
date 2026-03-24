@@ -737,6 +737,292 @@ spec:
 		})
 	})
 
+	Context("DependsOn chain deployment and deletion", func() {
+		const (
+			dependencyName = "e2e-chain-dependency"
+			dependentName  = "e2e-chain-dependent"
+			zarfNamespace  = "default"
+		)
+
+		AfterEach(func() {
+			for _, name := range []string{dependentName, dependencyName} {
+				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+					"-n", zarfNamespace, "--ignore-not-found=true", "--timeout=180s")
+				_, _ = utils.Run(cmd)
+			}
+		})
+
+		It("should deploy packages in dependsOn order and show correct phases", func() {
+			By("cleaning up dependency resources from prior runs")
+			for _, name := range []string{dependencyName, dependentName} {
+				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+					"-n", zarfNamespace, "--ignore-not-found=true", "--timeout=180s")
+				_, _ = utils.Run(cmd)
+			}
+
+			By("applying dependent package first so it waits on a missing dependency")
+			dependentYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  dependsOn:
+    - name: %s
+`, dependentName, zarfNamespace, registryURL, dependencyName)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dependentYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying dependent package waits in Pending with DependenciesNotMet")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Pending"))
+
+				cmd = exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='DependenciesMet')].reason}")
+				reason, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("DependenciesNotMet"))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("applying dependency package")
+			dependencyYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, dependencyName, zarfNamespace, registryURL)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dependencyYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dependency package to deploy")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependencyName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Deployed"))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying dependent package transitions to Deploying/Deployed and finishes Deployed")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(SatisfyAny(Equal("Deploying"), Equal("Deployed")))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Deployed"))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("should show Removing phase during deletion and clean up finalizers", func() {
+			const holdFinalizer = "e2e.zarf.dev/hold-delete"
+
+			By("applying dependency and dependent packages")
+			for _, item := range []struct {
+				name string
+				yaml string
+			}{
+				{
+					name: dependencyName,
+					yaml: fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, dependencyName, zarfNamespace, registryURL),
+				},
+				{
+					name: dependentName,
+					yaml: fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+  finalizers:
+    - %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  dependsOn:
+    - name: %s
+`, dependentName, zarfNamespace, holdFinalizer, registryURL, dependencyName),
+				},
+			} {
+				cmd := exec.Command("kubectl", "apply", "-f", "-")
+				cmd.Stdin = utils.StringReader(item.yaml)
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "failed to apply %s", item.name)
+			}
+
+			By("waiting for both packages to reach Deployed")
+			for _, name := range []string{dependencyName, dependentName} {
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "zarfpackage", name,
+						"-n", zarfNamespace,
+						"-o", "jsonpath={.status.phase}")
+					phase, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(phase).To(Equal("Deployed"))
+				}, 5*time.Minute, 2*time.Second).Should(Succeed())
+			}
+
+			By("deleting both packages without waiting so phase transitions are observable")
+			for _, name := range []string{dependentName, dependencyName} {
+				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+					"-n", zarfNamespace, "--wait=false", "--ignore-not-found=true")
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("verifying held dependent package enters Removing phase")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Removing"))
+			}, 2*time.Minute, 200*time.Millisecond).Should(Succeed())
+
+			By("removing the hold finalizer to allow garbage collection")
+			cmd := exec.Command("kubectl", "patch", "zarfpackage", dependentName,
+				"-n", zarfNamespace,
+				"--type=merge",
+				"-p", `{"metadata":{"finalizers":[]}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying both package CRs are fully removed")
+			Eventually(func(g Gomega) {
+				for _, name := range []string{dependencyName, dependentName} {
+					cmd := exec.Command("kubectl", "get", "zarfpackage", name, "-n", zarfNamespace)
+					_, err := utils.Run(cmd)
+					g.Expect(err).To(HaveOccurred(), "zarfpackage %s should be deleted", name)
+				}
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("should handle deleting a dependency while dependent exists", func() {
+			By("applying dependency package")
+			dependencyYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, dependencyName, zarfNamespace, registryURL)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dependencyYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dependency package to deploy")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependencyName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Deployed"))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("applying dependent package")
+			dependentYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  dependsOn:
+    - name: %s
+`, dependentName, zarfNamespace, registryURL, dependencyName)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dependentYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dependent package to deploy")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Deployed"))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("deleting the dependency package")
+			cmd = exec.Command("kubectl", "delete", "zarfpackage", dependencyName,
+				"-n", zarfNamespace, "--wait=false", "--ignore-not-found=true")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying dependent package reverts to Pending with DependenciesNotMet")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Pending"))
+
+				cmd = exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='DependenciesMet')].reason}")
+				reason, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("DependenciesNotMet"))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
+	})
+
 	Context("Operator Metrics After Reconciliation", func() {
 		It("should expose controller-runtime reconciliation metrics", func() {
 			By("creating a short-lived ZarfPackage CR to trigger reconciliation")

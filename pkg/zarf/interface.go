@@ -28,6 +28,7 @@ type DeployOptions struct {
 	SkipVersionCheck        bool
 	YoloMode                bool
 	RegistryCredentialJSON  []byte
+	HelmDebugEnabled        bool
 }
 
 // DeployResult contains the result of a deployment
@@ -36,6 +37,7 @@ type DeployResult struct {
 	Version            string
 	Generation         int
 	DeployedComponents []DeployedComponent
+	DeployLogs         []string
 }
 
 // DeployError includes structured deploy failure details from the sidecar.
