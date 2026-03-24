@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -94,6 +95,9 @@ func (s *ZarfServer) baseLoggerWithContext(ctx context.Context) (*slog.Logger, c
 
 func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*zarfv1.DeployResponse, error) {
 	log, ctx := s.loggerForRequest(ctx, req)
+	capture := newCapturingHandler(log.Handler(), 50)
+	captureLog := slog.New(capture)
+	ctx = logger.WithContext(ctx, captureLog)
 
 	if strings.TrimSpace(req.Source) == "" {
 		return nil, status.Error(codes.InvalidArgument, "source is required")
@@ -252,7 +256,19 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	result, err := packager.Deploy(ctx, pkgLayout, deployOpts)
 	if err != nil {
 		log.Error("deployment failed", "error", err, "package", pkgLayout.Pkg.Metadata.Name)
-		return nil, status.Errorf(codes.Internal, "deployment failed: %v", err)
+		failedComponent, failedChart := parseDeployError(err.Error())
+		detail := &zarfv1.DeployErrorDetail{
+			FailedComponent: failedComponent,
+			FailedChart:     failedChart,
+			ErrorMessage:    err.Error(),
+			DeployLogs:      capture.Lines(),
+		}
+		st, detailErr := status.New(classifyDeployError(err), fmt.Sprintf("deployment failed: %v", err)).WithDetails(detail)
+		if detailErr != nil {
+			log.Warn("failed to attach deploy error details", "error", detailErr)
+			return nil, status.Errorf(classifyDeployError(err), "deployment failed: %v", err)
+		}
+		return nil, st.Err()
 	}
 
 	// Convert result
@@ -524,6 +540,41 @@ func classifyOCIError(err error) codes.Code {
 	default:
 		return codes.Internal
 	}
+}
+
+func classifyDeployError(err error) codes.Code {
+	if err == nil {
+		return codes.Internal
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "another operation") && strings.Contains(msg, "in progress"):
+		return codes.FailedPrecondition
+	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timed out"), strings.Contains(msg, "timeout"):
+		return codes.DeadlineExceeded
+	default:
+		return codes.Internal
+	}
+}
+
+var (
+	componentErrorPattern = regexp.MustCompile(`unable to deploy component "([^"]+)"`)
+	chartErrorPattern     = regexp.MustCompile(`unable to install chart ([^:\s]+)`)
+)
+
+func parseDeployError(msg string) (failedComponent, failedChart string) {
+	componentMatch := componentErrorPattern.FindStringSubmatch(msg)
+	if len(componentMatch) > 1 {
+		failedComponent = componentMatch[1]
+	}
+
+	chartMatch := chartErrorPattern.FindStringSubmatch(msg)
+	if len(chartMatch) > 1 {
+		failedChart = chartMatch[1]
+	}
+
+	return failedComponent, failedChart
 }
 
 // getClusterArchitecture queries the cluster to determine the node architecture

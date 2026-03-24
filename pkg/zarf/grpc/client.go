@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -98,7 +99,19 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 
 	resp, err := c.client.Deploy(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("deploy failed: %w", err)
+		deployErr := &zarf.DeployError{Err: fmt.Errorf("deploy failed: %w", err)}
+		if st, ok := status.FromError(err); ok {
+			for _, detail := range st.Details() {
+				deployDetail, ok := detail.(*zarfv1.DeployErrorDetail)
+				if !ok {
+					continue
+				}
+				deployErr.FailedComponent = deployDetail.FailedComponent
+				deployErr.FailedChart = deployDetail.FailedChart
+				deployErr.DeployLogs = append([]string{}, deployDetail.DeployLogs...)
+			}
+		}
+		return nil, deployErr
 	}
 
 	return &zarf.DeployResult{

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage/driver"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
@@ -145,13 +147,15 @@ type ZarfPackageReconciler struct {
 	MaxConcurrentReconciles int
 	recorder                record.EventRecorder
 	helmReleaseExistsFn     func(ctx context.Context, releaseName, namespace string) (bool, error)
+	helmReleaseStatusFn     func(ctx context.Context, releaseName, namespace string) (release.Status, error)
+	fixStuckHelmReleaseFn   func(ctx context.Context, releaseName, namespace string, state release.Status) error
 	mu                      sync.RWMutex
 }
 
 // +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // For more details, check Reconcile and its Result here:
@@ -453,27 +457,16 @@ func (r *ZarfPackageReconciler) helmReleaseExists(ctx context.Context, releaseNa
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// Create Helm action configuration using CLI flags for REST client getter
-	actionConfig := new(action.Configuration)
-
-	// Use ConfigFlags as RESTClientGetter - this uses in-cluster config automatically
-	configFlags := genericclioptions.NewConfigFlags(true)
-	configFlags.Namespace = &namespace
-
-	if err := actionConfig.Init(
-		configFlags,
-		namespace,
-		"secret",                                 // Helm stores releases in secrets by default
-		func(format string, v ...interface{}) {}, // Silent logger
-	); err != nil {
-		return false, fmt.Errorf("failed to init helm action config: %w", err)
+	actionConfig, err := r.initHelmActionConfig(namespace)
+	if err != nil {
+		return false, err
 	}
 
 	// Use History action to check if release exists
 	historyClient := action.NewHistory(actionConfig)
 	historyClient.Max = 1 // We only need to know if it exists
 
-	_, err := historyClient.Run(releaseName)
+	_, err = historyClient.Run(releaseName)
 	if err != nil {
 		if err == driver.ErrReleaseNotFound {
 			return false, nil
@@ -500,6 +493,7 @@ func (r *ZarfPackageReconciler) deploy(
 	))
 	defer span.End()
 	deployStart := time.Now()
+	wasFailed := zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseFailed
 
 	log.Info("deploying package", "source", zarfPkg.Spec.Source)
 
@@ -576,10 +570,17 @@ func (r *ZarfPackageReconciler) deploy(
 		log.Info("resolved registry credentials from secret", "secret", ref)
 	}
 
+	if wasFailed {
+		r.preDeployCleanup(ctx, log, zarfPkg, zarfClient)
+	}
+
 	deployCtx, cancel := context.WithTimeout(ctx, timeout+time.Minute)
 	defer cancel()
 
 	result, err := zarfClient.Deploy(deployCtx, opts)
+	if err != nil {
+		result, err = r.retryDeployAfterHelmRecovery(ctx, log, zarfPkg, zarfClient, opts, timeout, err)
+	}
 	if err != nil {
 		r.observeDeployDuration(deployStart, "failure")
 		log.Error(err, "deployment failed")
@@ -587,7 +588,22 @@ func (r *ZarfPackageReconciler) deploy(
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			ReasonDeployFailed, fmt.Sprintf("Deployment failed: %v", err))
 		if r.recorder != nil {
-			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed, err.Error())
+			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed, truncateMessage(err.Error(), 512))
+			var deployErr *zarf.DeployError
+			if errors.As(err, &deployErr) {
+				if deployErr.FailedComponent != "" {
+					r.recorder.Eventf(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed,
+						"Component %q failed (chart: %s): %s",
+						deployErr.FailedComponent,
+						emptyIfBlank(deployErr.FailedChart, "unknown"),
+						truncateMessage(deployErr.Error(), 400),
+					)
+				}
+				if len(deployErr.DeployLogs) > 0 {
+					r.recorder.Event(zarfPkg, corev1.EventTypeWarning, "DeployLogs",
+						formatLogSummary(deployErr.DeployLogs, 1024))
+				}
+			}
 		}
 		if isUserRecoverableError(err) {
 			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionTrue,
@@ -608,31 +624,7 @@ func (r *ZarfPackageReconciler) deploy(
 		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 	}
 	r.observeDeployDuration(deployStart, "success")
-
-	// Update status from result
-	zarfPkg.Status.PackageName = result.PackageName
-	zarfPkg.Status.DeployedVersion = result.Version
-	zarfPkg.Status.DeployedGeneration = result.Generation
-	zarfPkg.Status.Source = zarfPkg.Spec.Source
-	zarfPkg.Status.ComponentStatuses = r.convertComponentStatuses(result.DeployedComponents)
-	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
-	zarfPkg.Status.DeployedSpecHash = zarfPkg.Spec.DeploymentHash()
-	r.resetFailures(zarfPkg)
-
-	// Clear drift info after successful deploy (drift has been remediated)
-	zarfPkg.Status.DriftInfo = nil
-	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionFalse,
-		ReasonDriftResolved, "No drift detected")
-	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
-		ReasonDeployed, "Package deployed successfully")
-	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
-		ReasonDeployed, "Deployment succeeded")
-	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionFalse,
-		ReasonDeployed, "Deployment complete")
-	if r.recorder != nil {
-		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonDeployed,
-			fmt.Sprintf("Package %s version %s deployed", result.PackageName, result.Version))
-	}
+	r.applyDeploySuccessStatus(zarfPkg, result)
 
 	// Clear the redeploy annotation if present.
 	// Use a MergeFrom patch on metadata only — this does not bump .metadata.generation
@@ -714,6 +706,298 @@ func (r *ZarfPackageReconciler) handleDeletion(ctx context.Context, log logr.Log
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *ZarfPackageReconciler) applyDeploySuccessStatus(zarfPkg *opsv1alpha1.ZarfPackage, result *zarf.DeployResult) {
+	zarfPkg.Status.PackageName = result.PackageName
+	zarfPkg.Status.DeployedVersion = result.Version
+	zarfPkg.Status.DeployedGeneration = result.Generation
+	zarfPkg.Status.Source = zarfPkg.Spec.Source
+	zarfPkg.Status.ComponentStatuses = r.convertComponentStatuses(result.DeployedComponents)
+	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+	zarfPkg.Status.DeployedSpecHash = zarfPkg.Spec.DeploymentHash()
+	r.resetFailures(zarfPkg)
+
+	// Clear drift info after successful deploy (drift has been remediated).
+	zarfPkg.Status.DriftInfo = nil
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionFalse,
+		ReasonDriftResolved, "No drift detected")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
+		ReasonDeployed, "Package deployed successfully")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+		ReasonDeployed, "Deployment succeeded")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionFalse,
+		ReasonDeployed, "Deployment complete")
+	if r.recorder != nil {
+		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonDeployed,
+			fmt.Sprintf("Package %s version %s deployed", result.PackageName, result.Version))
+	}
+}
+
+func (r *ZarfPackageReconciler) retryDeployAfterHelmRecovery(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	zarfClient zarf.Client,
+	opts zarf.DeployOptions,
+	timeout time.Duration,
+	deployErr error,
+) (*zarf.DeployResult, error) {
+	var dErr *zarf.DeployError
+	if !errors.As(deployErr, &dErr) || !dErr.IsHelmOperationInProgress() {
+		return nil, deployErr
+	}
+
+	log.Info("detected stuck helm operation; attempting recovery")
+	if r.recorder != nil {
+		r.recorder.Event(zarfPkg, corev1.EventTypeWarning, "HelmStuck",
+			"Detected helm operation in progress; attempting automatic recovery")
+	}
+
+	recovered := r.cleanupStuckHelmReleases(ctx, log, zarfPkg)
+	if recovered == 0 {
+		log.Info("helm recovery found no stuck releases")
+		return nil, deployErr
+	}
+
+	retryCtx, retryCancel := context.WithTimeout(ctx, timeout+time.Minute)
+	defer retryCancel()
+
+	retryResult, retryErr := zarfClient.Deploy(retryCtx, opts)
+	if retryErr != nil {
+		log.Error(retryErr, "deployment retry failed after helm recovery")
+		return nil, retryErr
+	}
+	if r.recorder != nil {
+		r.recorder.Eventf(zarfPkg, corev1.EventTypeNormal, "HelmRecoverySucceeded",
+			"Recovered %d stuck Helm release(s) and deployment retry succeeded", recovered)
+	}
+
+	return retryResult, nil
+}
+
+func (r *ZarfPackageReconciler) preDeployCleanup(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage, zarfClient zarf.Client) {
+	log.Info("running pre-deploy cleanup for previously failed package")
+
+	cleanedReleases := r.cleanupStuckHelmReleases(ctx, log, zarfPkg)
+	if cleanedReleases > 0 && r.recorder != nil {
+		r.recorder.Eventf(zarfPkg, corev1.EventTypeWarning, "HelmCleanup",
+			"Cleaned up %d stuck Helm release(s) before deploy retry", cleanedReleases)
+	}
+
+	if zarfPkg.Status.PackageName == "" {
+		return
+	}
+
+	removeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	removeErr := zarfClient.Remove(removeCtx, zarf.RemoveOptions{
+		PackageName: zarfPkg.Status.PackageName,
+	})
+	if removeErr == nil {
+		log.Info("removed previous failed package state", "package", zarfPkg.Status.PackageName)
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, "PreDeployCleanup",
+				"Removed previous failed package state before retry")
+		}
+		return
+	}
+
+	st := status.Convert(removeErr)
+	if st.Code() == codes.NotFound {
+		log.Info("previous package state already absent during pre-deploy cleanup", "package", zarfPkg.Status.PackageName)
+		return
+	}
+
+	log.Error(removeErr, "pre-deploy remove failed; continuing with deploy")
+	if r.recorder != nil {
+		r.recorder.Event(zarfPkg, corev1.EventTypeWarning, "PreDeployCleanupFailed",
+			truncateMessage(removeErr.Error(), 512))
+	}
+}
+
+func (r *ZarfPackageReconciler) cleanupStuckHelmReleases(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) int {
+	refs := uniqueChartRefs(zarfPkg.Status.ComponentStatuses)
+	if len(refs) == 0 {
+		return 0
+	}
+
+	cleaned := 0
+	for _, ref := range refs {
+		state, err := r.helmReleaseStatus(ctx, ref.name, ref.namespace)
+		if err != nil {
+			log.Error(err, "failed to check helm release state", "release", ref.name, "namespace", ref.namespace)
+			continue
+		}
+		if !isStuckHelmStatus(state) {
+			continue
+		}
+
+		log.Info("found stuck helm release", "release", ref.name, "namespace", ref.namespace, "state", state)
+		if err := r.fixStuckHelmRelease(ctx, ref.name, ref.namespace, state); err != nil {
+			log.Error(err, "failed to recover stuck helm release", "release", ref.name, "namespace", ref.namespace)
+			continue
+		}
+		cleaned++
+		if r.recorder != nil {
+			r.recorder.Eventf(zarfPkg, corev1.EventTypeWarning, "HelmReleaseRecovered",
+				"Recovered stuck Helm release %s/%s (state: %s)", ref.namespace, ref.name, state)
+		}
+	}
+
+	return cleaned
+}
+
+func (r *ZarfPackageReconciler) helmReleaseStatus(ctx context.Context, releaseName, namespace string) (release.Status, error) {
+	if r.helmReleaseStatusFn != nil {
+		return r.helmReleaseStatusFn(ctx, releaseName, namespace)
+	}
+
+	actionConfig, err := r.initHelmActionConfig(namespace)
+	if err != nil {
+		return release.StatusUnknown, err
+	}
+
+	historyClient := action.NewHistory(actionConfig)
+	historyClient.Max = 1
+	releases, err := historyClient.Run(releaseName)
+	if err != nil {
+		if err == driver.ErrReleaseNotFound {
+			return release.StatusUnknown, nil
+		}
+		return release.StatusUnknown, fmt.Errorf("failed to get release history: %w", err)
+	}
+	if len(releases) == 0 || releases[0].Info == nil {
+		return release.StatusUnknown, nil
+	}
+	return releases[0].Info.Status, nil
+}
+
+func (r *ZarfPackageReconciler) fixStuckHelmRelease(ctx context.Context, releaseName, namespace string, state release.Status) error {
+	if r.fixStuckHelmReleaseFn != nil {
+		return r.fixStuckHelmReleaseFn(ctx, releaseName, namespace, state)
+	}
+
+	actionConfig, err := r.initHelmActionConfig(namespace)
+	if err != nil {
+		return err
+	}
+
+	switch state {
+	case release.StatusPendingInstall:
+		uninstall := action.NewUninstall(actionConfig)
+		uninstall.KeepHistory = false
+		_, err = uninstall.Run(releaseName)
+		return err
+	case release.StatusPendingUpgrade, release.StatusPendingRollback:
+		rollback := action.NewRollback(actionConfig)
+		rollback.Force = true
+		rollback.CleanupOnFail = true
+		return rollback.Run(releaseName)
+	default:
+		return nil
+	}
+}
+
+func (r *ZarfPackageReconciler) initHelmActionConfig(namespace string) (*action.Configuration, error) {
+	actionConfig := new(action.Configuration)
+	configFlags := genericclioptions.NewConfigFlags(true)
+	configFlags.Namespace = &namespace
+	if err := actionConfig.Init(
+		configFlags,
+		namespace,
+		"secret",
+		func(string, ...interface{}) {},
+	); err != nil {
+		return nil, fmt.Errorf("failed to init helm action config: %w", err)
+	}
+	return actionConfig, nil
+}
+
+func isStuckHelmStatus(s release.Status) bool {
+	switch s {
+	case release.StatusPendingInstall, release.StatusPendingUpgrade, release.StatusPendingRollback:
+		return true
+	default:
+		return false
+	}
+}
+
+type chartRef struct {
+	name      string
+	namespace string
+}
+
+func uniqueChartRefs(components []opsv1alpha1.ComponentStatus) []chartRef {
+	refs := make([]chartRef, 0)
+	for _, comp := range components {
+		for _, chart := range comp.InstalledCharts {
+			if chart.ChartName == "" || chart.Namespace == "" {
+				continue
+			}
+			ref := chartRef{name: chart.ChartName, namespace: chart.Namespace}
+			if slices.Contains(refs, ref) {
+				continue
+			}
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
+func truncateMessage(msg string, max int) string {
+	if max <= 3 || len(msg) <= max {
+		return msg
+	}
+	return msg[:max-3] + "..."
+}
+
+func formatLogSummary(lines []string, maxBytes int) string {
+	if len(lines) == 0 || maxBytes <= 0 {
+		return ""
+	}
+
+	kept := make([]string, 0, len(lines))
+	const (
+		prefix   = "Last deploy logs:"
+		firstSep = " "
+		entrySep = " | "
+	)
+	total := len(prefix)
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		separatorLen := len(entrySep)
+		if len(kept) == 0 {
+			separatorLen = len(firstSep)
+		}
+		candidate := total + separatorLen + len(line)
+		if candidate > maxBytes {
+			break
+		}
+		kept = append(kept, line)
+		total = candidate
+	}
+
+	if len(kept) == 0 {
+		return truncateMessage(lines[len(lines)-1], maxBytes)
+	}
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+
+	return prefix + firstSep + strings.Join(kept, entrySep)
+}
+
+func emptyIfBlank(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (r *ZarfPackageReconciler) syncStatusFromDeployed(zarfPkg *opsv1alpha1.ZarfPackage, deployedPkg *zarf.PackageInfo) {

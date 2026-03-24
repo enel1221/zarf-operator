@@ -2,6 +2,7 @@ package zarf
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -35,6 +36,36 @@ type DeployResult struct {
 	Version            string
 	Generation         int
 	DeployedComponents []DeployedComponent
+}
+
+// DeployError includes structured deploy failure details from the sidecar.
+type DeployError struct {
+	Err             error
+	FailedComponent string
+	FailedChart     string
+	DeployLogs      []string
+}
+
+func (e *DeployError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *DeployError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *DeployError) IsHelmOperationInProgress() bool {
+	if e == nil || e.Err == nil {
+		return false
+	}
+	msg := strings.ToLower(e.Err.Error())
+	return strings.Contains(msg, "another operation") && strings.Contains(msg, "in progress")
 }
 
 // DeployedComponent represents a deployed component

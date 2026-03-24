@@ -57,6 +57,13 @@ message DeployResponse {
     reserved 5;
 }
 
+message DeployErrorDetail {
+    string failed_component = 1;
+    string failed_chart = 2;
+    string error_message = 3;
+    repeated string deploy_logs = 4;
+}
+
 message DeployedComponent {
     string name = 1;
     string status = 2;
