@@ -20,6 +20,11 @@ func TestAPICompatibilityGoldenFile(t *testing.T) {
 	// Verify all spec fields deserialize correctly
 	spec := pkg.Spec
 	assertEqual(t, "Source", spec.Source, "oci://example.com/pkg:v1")
+	assertEqual(t, "DependsOn length", len(spec.DependsOn), 2)
+	assertEqual(t, "DependsOn[0].Name", spec.DependsOn[0].Name, "base-package")
+	assertEqual(t, "DependsOn[0].Namespace", spec.DependsOn[0].Namespace, "")
+	assertEqual(t, "DependsOn[1].Name", spec.DependsOn[1].Name, "cross-ns-package")
+	assertEqual(t, "DependsOn[1].Namespace", spec.DependsOn[1].Namespace, "platform")
 	assertEqual(t, "AdoptExistingResources", spec.AdoptExistingResources, true)
 	assertEqual(t, "Components length", len(spec.Components), 2)
 	assertEqual(t, "Components[0]", spec.Components[0], "comp-a")

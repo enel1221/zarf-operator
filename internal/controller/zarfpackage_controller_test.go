@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -326,6 +327,72 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(ready.Reason).To(Equal(ReasonDeployFailed))
 			Expect(updated.Status.FailureCount).To(Equal(int32(1)))
 			Expect(updated.Status.LastFailureTime).NotTo(BeNil())
+		})
+
+		It("should clear last attempt error after a successful redeploy", func() {
+			nn := createResource("deploy-clear-attempt-error", true, "oci://example.com/pkg:v2")
+
+			obj := getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			obj.Status.LastAttemptError = "previous deploy error"
+			obj.Status.LastAttemptedRevision = "oci://example.com/pkg:v1"
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v2", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+			Expect(updated.Status.LastAttemptError).To(BeEmpty())
+			Expect(updated.Status.LastAttemptedRevision).To(Equal("oci://example.com/pkg:v2"))
+		})
+
+		It("should still deploy when deployed package lookup returns a transient error", func() {
+			nn := createResource("deploy-on-lookup-error", true, "oci://example.com/pkg:v1")
+
+			obj := getResource(nn)
+			obj.Status.PackageName = testPackageName
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, status.Error(codes.Unavailable, "lookup temporarily unavailable")).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1))
+		})
+
+		It("should truncate last attempt error messages to 512 bytes", func() {
+			nn := createResource("deploy-fail-truncated-error", true, "oci://example.com/pkg:v1")
+			longErr := strings.Repeat("x", 700)
+
+			fakeZarf := fake.New().
+				WithPackageMetadata(&zarf.PackageMetadata{Name: testPackageName, Version: "v1"}, nil).
+				WithGetDeployedPackage(nil, nil).
+				WithDeploy(nil, fmt.Errorf("%s", longErr))
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getResource(nn)
+			Expect(updated.Status.LastAttemptError).To(HaveLen(512))
+			Expect(updated.Status.LastAttemptError).To(HaveSuffix("..."))
+			Expect(updated.Status.LastAttemptError).To(ContainSubstring(strings.Repeat("x", 100)))
 		})
 
 		It("should requeue at the standard interval on user-recoverable deploy error", func() {

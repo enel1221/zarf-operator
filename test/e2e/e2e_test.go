@@ -508,6 +508,8 @@ spec:
 		})
 
 		It("should set Failed phase for an invalid OCI source", func() {
+			const invalidSource = "oci://invalid.registry.example.com/does-not-exist:v99.99.99"
+
 			By("applying a ZarfPackage CR with an invalid source")
 			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
@@ -515,9 +517,9 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  source: "oci://invalid.registry.example.com/does-not-exist:v99.99.99"
+  source: "%s"
   skipSignatureValidation: true
-`, zarfPkgName, zarfPkgNamespace)
+`, zarfPkgName, zarfPkgNamespace, invalidSource)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = utils.StringReader(zarfPkgYAML)
@@ -558,6 +560,123 @@ spec:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).NotTo(BeEmpty(), "Expected a descriptive error message in the Ready condition")
+
+			By("verifying enhanced error-handling status fields are populated")
+			cmd = exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
+				"-n", zarfPkgNamespace,
+				"-o", "jsonpath={.status.lastAttemptedRevision}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal(invalidSource))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
+				"-n", zarfPkgNamespace,
+				"-o", "jsonpath={.status.lastAttemptError}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "Expected lastAttemptError to capture failure details")
+		})
+
+		It("should keep dependent packages pending until dependsOn dependencies are deployed", func() {
+			const (
+				dependencyName = "e2e-dependency-failed"
+				dependentName  = "e2e-dependent-waiting"
+			)
+
+			By("cleaning up dependency resources from prior runs")
+			for _, name := range []string{dependencyName, dependentName} {
+				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+					"-n", zarfPkgNamespace, "--ignore-not-found=true", "--timeout=120s")
+				_, _ = utils.Run(cmd)
+			}
+
+			DeferCleanup(func() {
+				for _, name := range []string{dependencyName, dependentName} {
+					cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+						"-n", zarfPkgNamespace, "--ignore-not-found=true", "--timeout=120s")
+					_, _ = utils.Run(cmd)
+				}
+			})
+
+			By("applying a dependency package that will fail deployment")
+			dependencyYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://invalid.registry.example.com/does-not-exist:v99.99.99"
+  skipSignatureValidation: true
+`, dependencyName, zarfPkgNamespace)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dependencyYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the dependency package to reach Failed phase")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependencyName,
+					"-n", zarfPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Failed"))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("applying a dependent package with dependsOn")
+			dependentYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  dependsOn:
+    - name: %s
+`, dependentName, zarfPkgNamespace, registryURL, dependencyName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dependentYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dependency gating status to appear")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Pending"))
+
+				cmd = exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfPkgNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='DependenciesMet')].reason}")
+				reason, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("DependenciesNotMet"))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying the dependent package stays Pending with DependenciesNotMet")
+			Consistently(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfPkgNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Pending"))
+
+				cmd = exec.Command("kubectl", "get", "zarfpackage", dependentName,
+					"-n", zarfPkgNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='DependenciesMet')].reason}")
+				reason, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("DependenciesNotMet"))
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
 		})
 
 		It("should add and remove the finalizer during lifecycle", func() {
@@ -997,8 +1116,15 @@ spec:
 			}
 			Eventually(verifyNewHash, 5*time.Minute).Should(Succeed())
 
-			By("verifying the package returns to Deployed phase")
-			Eventually(verifyDeployed, 5*time.Minute).Should(Succeed())
+			By("verifying the package reports Ready=True after redeploy")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", zarfPkgName,
+					"-n", varPkgNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 5*time.Minute).Should(Succeed())
 
 			By("verifying the httpbin deployment has 2 replicas")
 			verifyReplicas := func(g Gomega) {

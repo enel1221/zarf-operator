@@ -8,6 +8,15 @@
   },
   "spec": {
     "source": "oci://example.com/pkg:v1",
+    "dependsOn": [
+      {
+        "name": "base-package"
+      },
+      {
+        "name": "cross-ns-package",
+        "namespace": "platform"
+      }
+    ],
     "adoptExistingResources": true,
     "components": ["comp-a", "comp-b"],
     "namespace": "target-ns",

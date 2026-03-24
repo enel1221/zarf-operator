@@ -125,6 +125,53 @@ func TestValidateCreate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "dependsOn with empty dependency name",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source:    "oci://example.com/pkg:v1",
+					DependsOn: []DependsOnReference{{Name: " "}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "dependsOn self dependency in same namespace",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "self", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source:    "oci://example.com/pkg:v1",
+					DependsOn: []DependsOnReference{{Name: "self"}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "dependsOn self dependency in explicit namespace",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "self", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://example.com/pkg:v1",
+					DependsOn: []DependsOnReference{
+						{Name: "self", Namespace: "default"},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "dependsOn cross-namespace dependency is valid",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://example.com/pkg:v1",
+					DependsOn: []DependsOnReference{
+						{Name: "base", Namespace: "platform"},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

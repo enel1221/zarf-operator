@@ -182,3 +182,75 @@ func TestFormatLogSummaryRespectsMaxBytes(t *testing.T) {
 		t.Fatalf("expected trimming to fit byte limit, got all lines: %q", summary)
 	}
 }
+
+func TestMarkFailedComponentStatusAppendsWhenMissing(t *testing.T) {
+	r := &ZarfPackageReconciler{}
+	pkg := &opsv1alpha1.ZarfPackage{
+		ObjectMeta: metav1.ObjectMeta{Name: "pkg", Namespace: "default"},
+		Spec:       opsv1alpha1.ZarfPackageSpec{Namespace: "apps"},
+	}
+
+	r.markFailedComponentStatus(pkg, &zarf.DeployError{
+		Err:             errors.New("deploy failed"),
+		FailedComponent: "alpha",
+		FailedChart:     "alpha-chart",
+	})
+
+	if len(pkg.Status.ComponentStatuses) != 1 {
+		t.Fatalf("expected one component status, got %d", len(pkg.Status.ComponentStatuses))
+	}
+
+	got := pkg.Status.ComponentStatuses[0]
+	if got.Name != "alpha" {
+		t.Fatalf("expected failed component name alpha, got %q", got.Name)
+	}
+	if got.Status != string(zarf.ComponentStatusFailed) {
+		t.Fatalf("expected component status failed, got %q", got.Status)
+	}
+	if len(got.InstalledCharts) != 1 {
+		t.Fatalf("expected one installed chart, got %d", len(got.InstalledCharts))
+	}
+	if got.InstalledCharts[0].Namespace != "apps" || got.InstalledCharts[0].ChartName != "alpha-chart" {
+		t.Fatalf("unexpected chart status: %+v", got.InstalledCharts[0])
+	}
+}
+
+func TestMarkFailedComponentStatusReplacesExistingComponent(t *testing.T) {
+	r := &ZarfPackageReconciler{}
+	pkg := &opsv1alpha1.ZarfPackage{
+		ObjectMeta: metav1.ObjectMeta{Name: "pkg", Namespace: "default"},
+		Spec:       opsv1alpha1.ZarfPackageSpec{Namespace: "apps"},
+		Status: opsv1alpha1.ZarfPackageStatus{
+			ComponentStatuses: []opsv1alpha1.ComponentStatus{
+				{
+					Name:   "alpha",
+					Status: string(zarf.ComponentStatusSucceeded),
+					InstalledCharts: []opsv1alpha1.InstalledChartStatus{
+						{Namespace: "old-ns", ChartName: "old-chart", Status: string(zarf.ChartStatusSucceeded)},
+					},
+				},
+			},
+		},
+	}
+
+	r.markFailedComponentStatus(pkg, &zarf.DeployError{
+		Err:             errors.New("deploy failed"),
+		FailedComponent: "alpha",
+		FailedChart:     "new-chart",
+	})
+
+	if len(pkg.Status.ComponentStatuses) != 1 {
+		t.Fatalf("expected existing component to be replaced in-place, got %d entries", len(pkg.Status.ComponentStatuses))
+	}
+
+	got := pkg.Status.ComponentStatuses[0]
+	if got.Status != string(zarf.ComponentStatusFailed) {
+		t.Fatalf("expected component status failed, got %q", got.Status)
+	}
+	if len(got.InstalledCharts) != 1 {
+		t.Fatalf("expected chart info to be replaced, got %d charts", len(got.InstalledCharts))
+	}
+	if got.InstalledCharts[0].Namespace != "apps" || got.InstalledCharts[0].ChartName != "new-chart" {
+		t.Fatalf("unexpected replaced chart status: %+v", got.InstalledCharts[0])
+	}
+}
