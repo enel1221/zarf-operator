@@ -54,11 +54,27 @@ func (s *ZarfPackageSpec) DeploymentHash() string {
 	return fmt.Sprintf("sha256:%x", hash[:8]) // 16 hex chars, sufficient for comparison
 }
 
+// DependsOnReference references another ZarfPackage that must be deployed first.
+type DependsOnReference struct {
+	// Name of the ZarfPackage dependency.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Namespace of the dependency. Defaults to the same namespace as this package when omitted.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
 // ZarfPackageSpec defines the desired state of ZarfPackage.
 type ZarfPackageSpec struct {
 	// Source is the location of the Zarf package OCI
 	// +kubebuilder:validation:Required
 	Source string `json:"source"`
+
+	// DependsOn specifies ZarfPackages that must be in Deployed phase before this package deploys.
+	// +optional
+	DependsOn []DependsOnReference `json:"dependsOn,omitempty"`
 
 	// AdoptExistingResources indicates whether to adopt any pre-existing K8s resources into the Helm charts managed by Zarf.
 	// +optional
@@ -243,6 +259,15 @@ const (
 
 	// ConditionTypeStalled indicates reconciliation is blocked on user action or terminal retries.
 	ConditionTypeStalled ZarfPackageConditionType = "Stalled"
+
+	// ConditionTypeDependenciesMet indicates whether all declared dependencies are deployed.
+	ConditionTypeDependenciesMet ZarfPackageConditionType = "DependenciesMet"
+)
+
+// Reason constants used when setting status conditions.
+const (
+	ReasonDependenciesNotMet = "DependenciesNotMet"
+	ReasonDependenciesMet    = "DependenciesMet"
 )
 
 // ZarfPackageStatus defines the observed state of ZarfPackage.

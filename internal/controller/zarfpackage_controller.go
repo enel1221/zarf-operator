@@ -42,6 +42,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -71,10 +72,12 @@ const (
 	AnnotationRedeploy   = "zarf.dev/redeploy"
 	DefaultRequeueAfter  = 5 * time.Minute
 	registrySecretRefKey = "spec.registryCredentialSecretRef"
+	dependsOnRefKey      = "spec.dependsOnRef"
 	backoffBaseInterval  = 10 * time.Second
 	backoffMaxInterval   = 5 * time.Minute
 	backoffMultiplier    = 2.0
 	backoffMaxJitter     = 5 * time.Second
+	dependencyRequeue    = 10 * time.Second
 )
 
 // Condition reasons
@@ -259,6 +262,27 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 	}
+
+	dependenciesMet, notReadyDeps, depErr := r.checkDependencies(ctx, zarfPkg)
+	if depErr != nil {
+		return ctrl.Result{}, depErr
+	}
+	if !dependenciesMet {
+		message := fmt.Sprintf("Waiting for dependencies to be deployed: %s", strings.Join(notReadyDeps, ", "))
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDependenciesMet, metav1.ConditionFalse,
+			opsv1alpha1.ReasonDependenciesNotMet, message)
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+			opsv1alpha1.ReasonDependenciesNotMet, message)
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+			opsv1alpha1.ReasonDependenciesNotMet, "Waiting for dependency readiness")
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, opsv1alpha1.ReasonDependenciesNotMet, message)
+		}
+		return ctrl.Result{RequeueAfter: dependencyRequeue}, nil
+	}
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDependenciesMet, metav1.ConditionTrue,
+		opsv1alpha1.ReasonDependenciesMet, "All dependencies are deployed")
 
 	// Perform reconciliation
 	return r.reconcile(ctx, log, zarfPkg, zarfClient, original)
@@ -1053,6 +1077,44 @@ func parseSetVariables(set []string) map[string]string {
 	return result
 }
 
+func (r *ZarfPackageReconciler) checkDependencies(ctx context.Context, zarfPkg *opsv1alpha1.ZarfPackage) (bool, []string, error) {
+	if len(zarfPkg.Spec.DependsOn) == 0 {
+		return true, nil, nil
+	}
+
+	notReady := make([]string, 0)
+	for _, dep := range zarfPkg.Spec.DependsOn {
+		if strings.TrimSpace(dep.Name) == "" {
+			notReady = append(notReady, "<empty dependency name>")
+			continue
+		}
+		depNamespace := dep.Namespace
+		if depNamespace == "" {
+			depNamespace = zarfPkg.Namespace
+		}
+		depKey := types.NamespacedName{Namespace: depNamespace, Name: dep.Name}
+
+		var depPkg opsv1alpha1.ZarfPackage
+		if err := r.Get(ctx, depKey, &depPkg); err != nil {
+			if apierrors.IsNotFound(err) {
+				notReady = append(notReady, fmt.Sprintf("%s/%s (not found)", depNamespace, dep.Name))
+				continue
+			}
+			return false, nil, err
+		}
+
+		if depPkg.Status.Phase != opsv1alpha1.ZarfPackagePhaseDeployed {
+			phase := depPkg.Status.Phase
+			if phase == "" {
+				phase = opsv1alpha1.ZarfPackagePhasePending
+			}
+			notReady = append(notReady, fmt.Sprintf("%s/%s (phase=%s)", depNamespace, dep.Name, phase))
+		}
+	}
+
+	return len(notReady) == 0, notReady, nil
+}
+
 func isUserRecoverableError(err error) bool {
 	st := status.Convert(err)
 	switch st.Code() {
@@ -1078,6 +1140,26 @@ func (r *ZarfPackageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return err
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &opsv1alpha1.ZarfPackage{}, dependsOnRefKey, func(raw client.Object) []string {
+		zarfPkg, ok := raw.(*opsv1alpha1.ZarfPackage)
+		if !ok || len(zarfPkg.Spec.DependsOn) == 0 {
+			return nil
+		}
+		refs := make([]string, 0, len(zarfPkg.Spec.DependsOn))
+		for _, dep := range zarfPkg.Spec.DependsOn {
+			if dep.Name == "" {
+				continue
+			}
+			depNamespace := dep.Namespace
+			if depNamespace == "" {
+				depNamespace = zarfPkg.Namespace
+			}
+			refs = append(refs, dependencyRefIndexValue(depNamespace, dep.Name))
+		}
+		return refs
+	}); err != nil {
+		return err
+	}
 
 	annotationPredicate := predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
@@ -1090,9 +1172,27 @@ func (r *ZarfPackageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return e.ObjectOld.GetAnnotations()[AnnotationRedeploy] != e.ObjectNew.GetAnnotations()[AnnotationRedeploy]
 		},
 	}
+	dependencyPhasePredicate := predicate.Funcs{
+		CreateFunc:  func(_ event.CreateEvent) bool { return false },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return false },
+		GenericFunc: func(_ event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldObj, oldOK := e.ObjectOld.(*opsv1alpha1.ZarfPackage)
+			newObj, newOK := e.ObjectNew.(*opsv1alpha1.ZarfPackage)
+			if !oldOK || !newOK {
+				return false
+			}
+			return oldObj.Status.Phase != newObj.Status.Phase
+		},
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&opsv1alpha1.ZarfPackage{}, builder.WithPredicates(annotationPredicate)).
+		Watches(
+			&opsv1alpha1.ZarfPackage{},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForDependents),
+			builder.WithPredicates(dependencyPhasePredicate),
+		).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.requestsForRegistrySecret)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: r.maxConcurrentReconciles(),
@@ -1108,6 +1208,10 @@ func (r *ZarfPackageReconciler) maxConcurrentReconciles() int {
 	return r.MaxConcurrentReconciles
 }
 
+func dependencyRefIndexValue(namespace, name string) string {
+	return namespace + "/" + name
+}
+
 func (r *ZarfPackageReconciler) requestsForRegistrySecret(ctx context.Context, obj client.Object) []reconcile.Request {
 	secret, ok := obj.(*corev1.Secret)
 	if !ok {
@@ -1120,6 +1224,31 @@ func (r *ZarfPackageReconciler) requestsForRegistrySecret(ctx context.Context, o
 	}
 	requests := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+		})
+	}
+	return requests
+}
+
+func (r *ZarfPackageReconciler) requestsForDependents(ctx context.Context, obj client.Object) []reconcile.Request {
+	dependency, ok := obj.(*opsv1alpha1.ZarfPackage)
+	if !ok {
+		return nil
+	}
+	dependencyKey := dependencyRefIndexValue(dependency.Namespace, dependency.Name)
+
+	var list opsv1alpha1.ZarfPackageList
+	if err := r.List(ctx, &list, client.MatchingFields{dependsOnRefKey: dependencyKey}); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to map dependency package to dependents", "dependency", dependencyKey)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		if list.Items[i].Name == dependency.Name && list.Items[i].Namespace == dependency.Namespace {
+			continue
+		}
 		requests = append(requests, reconcile.Request{
 			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
 		})

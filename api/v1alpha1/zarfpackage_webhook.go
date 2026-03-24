@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -127,6 +128,28 @@ func validateZarfPackageSpec(pkg *ZarfPackage) field.ErrorList {
 				field.NewPath("spec", "components").Index(i),
 				comp,
 				"component name must not be empty",
+			))
+		}
+	}
+
+	for i, dep := range pkg.Spec.DependsOn {
+		if strings.TrimSpace(dep.Name) == "" {
+			allErrs = append(allErrs, field.Invalid(
+				field.NewPath("spec", "dependsOn").Index(i).Child("name"),
+				dep.Name,
+				"dependency name must not be empty",
+			))
+			continue
+		}
+		depNamespace := dep.Namespace
+		if depNamespace == "" {
+			depNamespace = pkg.Namespace
+		}
+		if dep.Name == pkg.Name && depNamespace == pkg.Namespace {
+			allErrs = append(allErrs, field.Invalid(
+				field.NewPath("spec", "dependsOn").Index(i),
+				dep,
+				"package cannot depend on itself",
 			))
 		}
 	}

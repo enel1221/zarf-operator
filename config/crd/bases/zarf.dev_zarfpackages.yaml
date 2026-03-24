@@ -70,6 +70,25 @@ spec:
                 items:
                   type: string
                 type: array
+              dependsOn:
+                description: DependsOn specifies ZarfPackages that must be in Deployed
+                  phase before this package deploys.
+                items:
+                  description: DependsOnReference references another ZarfPackage that
+                    must be deployed first.
+                  properties:
+                    name:
+                      description: Name of the ZarfPackage dependency.
+                      minLength: 1
+                      type: string
+                    namespace:
+                      description: Namespace of the dependency. Defaults to the same
+                        namespace as this package when omitted.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               features:
                 description: Features is a list of features to enable in the Zarf
                   package.

@@ -677,6 +677,144 @@ var _ = Describe("ZarfPackage Controller", func() {
 		})
 	})
 
+	Context("Dependency ordering", func() {
+		It("should keep package pending when dependencies are not yet deployed", func() {
+			dependencyNN := createResource("dep-unready", true, "oci://example.com/dep:v1")
+			_ = dependencyNN
+
+			nn := createResource("dependent-unready", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-unready"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhasePending))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+			Expect(deps.Reason).To(Equal(opsv1alpha1.ReasonDependenciesNotMet))
+		})
+
+		It("should deploy once dependencies are deployed", func() {
+			dependencyNN := createResource("dep-ready", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-ready", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-ready"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1))
+
+			updated := getResource(nn)
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionTrue))
+			Expect(deps.Reason).To(Equal(opsv1alpha1.ReasonDependenciesMet))
+		})
+
+		It("should deploy immediately when no dependencies are declared", func() {
+			nn := createResource("dependent-no-deps", true, "oci://example.com/pkg:v1")
+
+			deployCalled := 0
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1))
+		})
+
+		It("should keep package pending when dependency does not exist", func() {
+			nn := createResource("dependent-missing-dep", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "not-found"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Message).To(ContainSubstring("not-found"))
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhasePending))
+		})
+
+		It("should resolve dependencies across namespaces", func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "deps-ns"}}
+			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, ns) })
+
+			dependency := &opsv1alpha1.ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dep-cross-ns",
+					Namespace: "deps-ns",
+				},
+				Spec: opsv1alpha1.ZarfPackageSpec{Source: "oci://example.com/dep:v1"},
+			}
+			Expect(k8sClient.Create(ctx, dependency)).To(Succeed())
+			DeferCleanup(func() {
+				lookup := &opsv1alpha1.ZarfPackage{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "dep-cross-ns", Namespace: "deps-ns"}, lookup)
+				if err == nil {
+					_ = k8sClient.Delete(ctx, lookup)
+				}
+			})
+
+			dependency.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, dependency)).To(Succeed())
+
+			nn := createResource("dependent-cross-ns", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{
+				{Name: "dep-cross-ns", Namespace: "deps-ns"},
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			reconciler := newReconciler(fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			}))
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(1))
+		})
+	})
+
 	Context("Deletion behavior", func() {
 		It("should remove package and clear finalizer on deletion", func() {
 			nn := createResource("delete-success-pkg", true, "oci://example.com/pkg:v1")
