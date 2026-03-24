@@ -54,9 +54,10 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/...;./internal/controller/..." output:crd:artifacts:config=config/crd/bases
+	$(MAKE) sync-chart-crd
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: manifests controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
 
 .PHONY: generate-proto
@@ -64,6 +65,11 @@ generate-proto: ## Generate protobuf Go code from proto files.
 	protoc --go_out=. --go_opt=module=github.com/enel1221/zarf-operator \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/enel1221/zarf-operator \
 		-I proto proto/zarf/v1/zarf.proto
+
+.PHONY: sync-chart-crd
+sync-chart-crd: ## Copy generated CRD into dist Helm chart templates.
+	@mkdir -p $$(dirname "$(CRD_CHART_TEMPLATE)")
+	cp "$(CRD_SOURCE)" "$(CRD_CHART_TEMPLATE)"
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -89,6 +95,10 @@ E2E_IMG ?= example.com/zarf-operator:v0.0.1
 E2E_SIDECAR_IMG ?= example.com/zarf-operator-sidecar:v0.0.1
 E2E_AUTH_REGISTRY_NODEPORT ?= 30501
 E2E_AUTH_REGISTRY_HOST_PORT ?= 5002
+
+# Generated CRD source and chart destination used by release artifacts.
+CRD_SOURCE ?= config/crd/bases/zarf.dev_zarfpackages.yaml
+CRD_CHART_TEMPLATE ?= dist/chart/templates/crd/zarf.dev_zarfpackages.yaml
 
 # All test package directories
 E2E_PKG_DIRS := test/e2e/testdata/packages/nginx \
