@@ -23,24 +23,37 @@ import (
 	"math"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/storage/driver"
@@ -55,6 +68,7 @@ const (
 	ZarfPackageFinalizer = "zarfpackage.zarf.dev/finalizer"
 	AnnotationRedeploy   = "zarf.dev/redeploy"
 	DefaultRequeueAfter  = 5 * time.Minute
+	registrySecretRefKey = "spec.registryCredentialSecretRef"
 	backoffBaseInterval  = 10 * time.Second
 	backoffMaxInterval   = 5 * time.Minute
 	backoffMultiplier    = 2.0
@@ -76,6 +90,7 @@ const (
 	ReasonMaxRetriesExceeded = "MaxRetriesExceeded"
 	ReasonRedeployRequested  = "RedeployRequested"
 	ReasonSecretNotFound     = "SecretNotFound"
+	ReasonStalled            = "Stalled"
 )
 
 // Error definitions
@@ -84,17 +99,53 @@ var (
 	ErrRemoveFailed   = errors.New("removal failed")
 	ErrClientNotReady = errors.New("zarf client not ready")
 	tracer            = otel.Tracer("zarfpackage-controller")
+	phaseMetric       = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "zarfpackage_phase_info",
+			Help: "Current phase for each ZarfPackage (value is always 1 for the active phase).",
+		},
+		[]string{"namespace", "name", "phase"},
+	)
+	deployDurationMetric = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "zarfpackage_deploy_duration_seconds",
+			Help:    "Duration of zarf package deploy attempts.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"result"},
+	)
+	failureMetric = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "zarfpackage_failures_total",
+			Help: "Total number of failed controller operations by reason.",
+		},
+		[]string{"reason"},
+	)
+	driftDetectedMetric = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "zarfpackage_drift_detected_total",
+			Help: "Total number of times drift was detected.",
+		},
+	)
+	suspendedMetric = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "zarfpackage_suspended",
+			Help: "Whether a ZarfPackage is currently suspended (1) or active (0).",
+		},
+		[]string{"namespace", "name"},
+	)
 )
 
 // ZarfPackageReconciler reconciles a ZarfPackage object
 type ZarfPackageReconciler struct {
 	client.Client
-	Log                 logr.Logger
-	Scheme              *runtime.Scheme
-	ZarfClient          zarf.Client
-	RequeueInterval     time.Duration
-	recorder            record.EventRecorder
-	helmReleaseExistsFn func(ctx context.Context, releaseName, namespace string) (bool, error)
+	Scheme                  *runtime.Scheme
+	ZarfClient              zarf.Client
+	RequeueInterval         time.Duration
+	MaxConcurrentReconciles int
+	recorder                record.EventRecorder
+	helmReleaseExistsFn     func(ctx context.Context, releaseName, namespace string) (bool, error)
+	mu                      sync.RWMutex
 }
 
 // +kubebuilder:rbac:groups=zarf.dev,resources=zarfpackages,verbs=get;list;watch;create;update;patch;delete
@@ -116,8 +167,7 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		span.End()
 	}()
-	// _ = logf.FromContext(ctx)
-	log := r.Log.WithValues("zarfpackage", req.NamespacedName)
+	log := logf.FromContext(ctx).WithValues("zarfpackage", req.NamespacedName)
 	start := time.Now()
 
 	// Fetch the ZarfPackage
@@ -129,33 +179,37 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Capture current status for comparison
-	currentStatus := zarfPkg.Status.DeepCopy()
+	// Capture original object for status patching.
+	original := zarfPkg.DeepCopy()
 
 	// Defer status update
 	defer func() {
-		if !equality.Semantic.DeepEqual(currentStatus, &zarfPkg.Status) {
+		if !equality.Semantic.DeepEqual(&original.Status, &zarfPkg.Status) {
 			zarfPkg.Status.LastReconcileTime = metav1.Now()
 			zarfPkg.Status.ObservedGeneration = zarfPkg.Generation
 
-			if updateErr := r.Status().Update(ctx, zarfPkg); updateErr != nil {
+			if updateErr := r.Status().Patch(ctx, zarfPkg, client.MergeFrom(original)); updateErr != nil {
 				if apierrors.IsConflict(updateErr) {
 					log.V(1).Info("conflict while updating status, will requeue")
-					result = ctrl.Result{Requeue: true}
+					if err == nil {
+						result = ctrl.Result{Requeue: true}
+					}
 					return
 				}
 				log.Error(updateErr, "failed to update status")
-				if err == nil {
+				if err == nil && result.IsZero() {
 					err = updateErr
 				}
 			}
 		}
+		r.recordResourceMetrics(zarfPkg)
 		log.Info("reconcile complete", "duration", time.Since(start))
 	}()
+	zarfClient := r.getZarfClient()
 
 	// Handle deletion
 	if !zarfPkg.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, log, zarfPkg)
+		return r.handleDeletion(ctx, log, zarfPkg, zarfClient)
 	}
 
 	// Add finalizer if not present
@@ -175,16 +229,20 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if r.recorder != nil {
 			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, "Suspended", "Reconciliation suspended by user")
 		}
+		r.setSuspendedMetric(zarfPkg, true)
 		return ctrl.Result{}, nil
 	}
 
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeSuspended, metav1.ConditionFalse,
 		"Active", "Reconciliation is active")
+	r.setSuspendedMetric(zarfPkg, false)
 
 	// Check if zarf client is available
-	if r.ZarfClient == nil {
+	if zarfClient == nil {
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			ReasonReconciling, "Waiting for Zarf sidecar to be ready")
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+			ReasonReconciling, "Waiting for sidecar connectivity")
 		if r.recorder != nil {
 			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSidecarUnavailable,
 				"Zarf sidecar is not available, waiting for reconnection")
@@ -193,38 +251,26 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		r.recordFailure(zarfPkg)
 		if r.maxRetriesExceeded(zarfPkg) {
 			r.markMaxRetriesExceeded(zarfPkg, "waiting for Zarf sidecar")
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
 		}
 		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 	}
 
 	// Perform reconciliation
-	return r.reconcile(ctx, log, zarfPkg)
+	return r.reconcile(ctx, log, zarfPkg, zarfClient, original)
 
 	// return ctrl.Result{}, nil
 }
 
-func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) (ctrl.Result, error) {
-	// Ensure client is available
-	if r.ZarfClient == nil {
-		log.Info("zarf sidecar not available, requeueing")
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-			ReasonSidecarUnavailable, "Zarf sidecar is not available - ensure sidecar is running")
-		if r.recorder != nil {
-			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSidecarUnavailable,
-				"Zarf sidecar is not available, waiting for reconnection")
-		}
-		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
-		r.recordFailure(zarfPkg)
-		if r.maxRetriesExceeded(zarfPkg) {
-			r.markMaxRetriesExceeded(zarfPkg, "waiting for Zarf sidecar")
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
-	}
-
+func (r *ZarfPackageReconciler) reconcile(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	zarfClient zarf.Client,
+	original *opsv1alpha1.ZarfPackage,
+) (ctrl.Result, error) {
 	// Check current deployment state
-	deployedPkg, err := r.ZarfClient.GetDeployedPackage(ctx, zarfPkg.Status.PackageName)
+	deployedPkg, err := zarfClient.GetDeployedPackage(ctx, zarfPkg.Status.PackageName)
 	if err != nil {
 		log.Error(err, "failed to get deployed package state")
 	}
@@ -233,7 +279,7 @@ func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, 
 	needsDeploy := r.needsDeploy(ctx, zarfPkg, deployedPkg)
 
 	if needsDeploy {
-		return r.deploy(ctx, log, zarfPkg)
+		return r.deploy(ctx, log, zarfPkg, zarfClient, original)
 	}
 
 	// Package is deployed and in sync
@@ -241,6 +287,8 @@ func (r *ZarfPackageReconciler) reconcile(ctx context.Context, log logr.Logger, 
 	r.resetFailures(zarfPkg)
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 		ReasonDeployed, "Package deployed successfully")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+		ReasonDeployed, "Package is actively reconciling")
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
 
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
@@ -291,6 +339,7 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonDriftDetected,
 					fmt.Sprintf("Drift detected: %d missing Helm releases: %v", len(missingReleases), missingReleases))
 			}
+			driftDetectedMetric.Inc()
 			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionTrue,
 				ReasonDriftDetected, fmt.Sprintf("Drift detected: %d missing releases", len(missingReleases)))
 
@@ -358,6 +407,19 @@ func calculateBackoff(failureCount int32) time.Duration {
 	return time.Duration(backoff) + jitter
 }
 
+func buildRateLimiter() workqueue.TypedRateLimiter[reconcile.Request] {
+	failureRateLimiter := workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](
+		1*time.Second,
+		5*time.Minute,
+	)
+
+	totalRateLimiter := &workqueue.TypedBucketRateLimiter[reconcile.Request]{
+		Limiter: rate.NewLimiter(rate.Limit(10), 100),
+	}
+
+	return workqueue.NewTypedMaxOfRateLimiter[reconcile.Request](failureRateLimiter, totalRateLimiter)
+}
+
 func (r *ZarfPackageReconciler) recordFailure(zarfPkg *opsv1alpha1.ZarfPackage) {
 	zarfPkg.Status.FailureCount++
 	now := metav1.Now()
@@ -382,6 +444,8 @@ func (r *ZarfPackageReconciler) markMaxRetriesExceeded(zarfPkg *opsv1alpha1.Zarf
 		r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonMaxRetriesExceeded,
 			fmt.Sprintf("Operation failed after %d attempts", zarfPkg.Status.FailureCount))
 	}
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionTrue,
+		ReasonStalled, fmt.Sprintf("Controller stopped retrying after %d failures", zarfPkg.Status.FailureCount))
 }
 
 func (r *ZarfPackageReconciler) helmReleaseExists(ctx context.Context, releaseName, namespace string) (bool, error) {
@@ -424,29 +488,18 @@ func (r *ZarfPackageReconciler) helmReleaseExists(ctx context.Context, releaseNa
 	return true, nil
 }
 
-func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) (ctrl.Result, error) {
+func (r *ZarfPackageReconciler) deploy(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	zarfClient zarf.Client,
+	original *opsv1alpha1.ZarfPackage,
+) (ctrl.Result, error) {
 	ctx, span := tracer.Start(ctx, "Deploy", trace.WithAttributes(
 		attribute.String("source", zarfPkg.Spec.Source),
 	))
 	defer span.End()
-
-	// Ensure client is available
-	if r.ZarfClient == nil {
-		log.Info("zarf sidecar not available for deployment, requeueing")
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-			ReasonSidecarUnavailable, "Cannot deploy: Zarf sidecar is not available")
-		if r.recorder != nil {
-			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSidecarUnavailable,
-				"Zarf sidecar is not available, waiting for reconnection")
-		}
-		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
-		r.recordFailure(zarfPkg)
-		if r.maxRetriesExceeded(zarfPkg) {
-			r.markMaxRetriesExceeded(zarfPkg, "waiting for Zarf sidecar")
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
-	}
+	deployStart := time.Now()
 
 	log.Info("deploying package", "source", zarfPkg.Spec.Source)
 
@@ -455,6 +508,9 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 		ReasonDeploying, "Deployment in progress")
 	if r.recorder != nil {
 		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonDeploying, "Starting package deployment")
+	}
+	if patchErr := r.Status().Patch(ctx, zarfPkg, client.MergeFrom(original)); patchErr != nil {
+		log.Error(patchErr, "failed to persist Deploying status")
 	}
 
 	// Build deploy options from spec
@@ -498,6 +554,8 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
 					fmt.Sprintf("Secret %q not found", ref))
 			}
+			r.recordFailure(zarfPkg)
+			r.recordFailureMetric(ReasonSecretNotFound)
 			return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 		}
 		dockerCfg, ok := secret.Data[".dockerconfigjson"]
@@ -510,14 +568,20 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
 					fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
 			}
-			return ctrl.Result{}, nil
+			r.recordFailure(zarfPkg)
+			r.recordFailureMetric(ReasonSecretNotFound)
+			return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 		}
 		opts.RegistryCredentialJSON = dockerCfg
 		log.Info("resolved registry credentials from secret", "secret", ref)
 	}
 
-	result, err := r.ZarfClient.Deploy(ctx, opts)
+	deployCtx, cancel := context.WithTimeout(ctx, timeout+time.Minute)
+	defer cancel()
+
+	result, err := zarfClient.Deploy(deployCtx, opts)
 	if err != nil {
+		r.observeDeployDuration(deployStart, "failure")
 		log.Error(err, "deployment failed")
 		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
@@ -525,20 +589,25 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 		if r.recorder != nil {
 			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed, err.Error())
 		}
-		if isPermanentError(err) {
-			log.Info("permanent deploy failure, not retrying", "error", err)
-			return ctrl.Result{}, nil
+		if isUserRecoverableError(err) {
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionTrue,
+				ReasonStalled, "Waiting for user action to fix deployment input")
+			r.recordFailureMetric(ReasonDeployFailed)
+			log.Info("user-recoverable error, will recheck at standard interval", "error", err)
+			return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
 		}
 		r.recordFailure(zarfPkg)
+		r.recordFailureMetric(ReasonDeployFailed)
 
 		if r.maxRetriesExceeded(zarfPkg) {
 			r.markMaxRetriesExceeded(zarfPkg, "deploying package")
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
 		}
 
 		// Requeue for retry.
 		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 	}
+	r.observeDeployDuration(deployStart, "success")
 
 	// Update status from result
 	zarfPkg.Status.PackageName = result.PackageName
@@ -556,6 +625,8 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 		ReasonDriftResolved, "No drift detected")
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 		ReasonDeployed, "Package deployed successfully")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+		ReasonDeployed, "Deployment succeeded")
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionFalse,
 		ReasonDeployed, "Deployment complete")
 	if r.recorder != nil {
@@ -583,7 +654,7 @@ func (r *ZarfPackageReconciler) deploy(ctx context.Context, log logr.Logger, zar
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
 }
 
-func (r *ZarfPackageReconciler) handleDeletion(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) (ctrl.Result, error) {
+func (r *ZarfPackageReconciler) handleDeletion(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage, zarfClient zarf.Client) (ctrl.Result, error) {
 	ctx, span := tracer.Start(ctx, "HandleDeletion", trace.WithAttributes(
 		attribute.String("package", zarfPkg.Status.PackageName),
 	))
@@ -599,30 +670,41 @@ func (r *ZarfPackageReconciler) handleDeletion(ctx context.Context, log logr.Log
 		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonRemoving, "Removing package")
 	}
 
-	if zarfPkg.Status.PackageName != "" && r.ZarfClient != nil {
-		if err := r.ZarfClient.Remove(ctx, zarf.RemoveOptions{
+	if zarfPkg.Status.PackageName != "" && zarfClient != nil {
+		removeCtx, cancel := context.WithTimeout(ctx, 16*time.Minute)
+		defer cancel()
+
+		if err := zarfClient.Remove(removeCtx, zarf.RemoveOptions{
 			PackageName: zarfPkg.Status.PackageName,
 		}); err != nil {
-			log.Error(err, "failed to remove package")
-			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-				ReasonRemoveFailed, fmt.Sprintf("Remove failed: %v", err))
-			if r.recorder != nil {
-				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonRemoveFailed, err.Error())
+			st := status.Convert(err)
+			if st.Code() == codes.NotFound {
+				log.Info("package already absent during deletion, proceeding with finalizer removal", "package", zarfPkg.Status.PackageName)
+			} else {
+				log.Error(err, "failed to remove package")
+				r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+					ReasonRemoveFailed, fmt.Sprintf("Remove failed: %v", err))
+				if r.recorder != nil {
+					r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonRemoveFailed, err.Error())
+				}
+				if isUserRecoverableError(err) {
+					log.Info("user-recoverable error during removal, will recheck at standard interval", "error", err)
+					return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+				}
+				r.recordFailure(zarfPkg)
+				r.recordFailureMetric(ReasonRemoveFailed)
+				if r.maxRetriesExceeded(zarfPkg) {
+					r.markMaxRetriesExceeded(zarfPkg, "removing package")
+					return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+				}
+				return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 			}
-			if isPermanentError(err) {
-				log.Info("permanent remove failure, not retrying", "error", err)
-				return ctrl.Result{}, nil
-			}
-			r.recordFailure(zarfPkg)
-			if r.maxRetriesExceeded(zarfPkg) {
-				r.markMaxRetriesExceeded(zarfPkg, "removing package")
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 		}
 	}
 
 	r.resetFailures(zarfPkg)
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+		ReasonRemoving, "Deletion is progressing")
 
 	// Remove finalizer
 	patch := client.MergeFrom(zarfPkg.DeepCopy())
@@ -666,28 +748,13 @@ func (r *ZarfPackageReconciler) convertComponentStatuses(comps []zarf.DeployedCo
 }
 
 func (r *ZarfPackageReconciler) setCondition(zarfPkg *opsv1alpha1.ZarfPackage, condType opsv1alpha1.ZarfPackageConditionType, status metav1.ConditionStatus, reason, message string) {
-	now := metav1.Now()
-	newCond := opsv1alpha1.ZarfPackageCondition{
-		Type:               condType,
+	apimeta.SetStatusCondition(&zarfPkg.Status.Conditions, metav1.Condition{
+		Type:               string(condType),
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
-		LastTransitionTime: now,
-	}
-
-	for i, c := range zarfPkg.Status.Conditions {
-		if c.Type == condType {
-			if c.Status != status {
-				zarfPkg.Status.Conditions[i] = newCond
-			} else {
-				// Only update reason/message, keep transition time
-				zarfPkg.Status.Conditions[i].Reason = reason
-				zarfPkg.Status.Conditions[i].Message = message
-			}
-			return
-		}
-	}
-	zarfPkg.Status.Conditions = append(zarfPkg.Status.Conditions, newCond)
+		ObservedGeneration: zarfPkg.Generation,
+	})
 }
 
 // parseSetVariables converts a slice of "KEY=value" strings to a map
@@ -702,10 +769,10 @@ func parseSetVariables(set []string) map[string]string {
 	return result
 }
 
-func isPermanentError(err error) bool {
+func isUserRecoverableError(err error) bool {
 	st := status.Convert(err)
 	switch st.Code() {
-	case codes.InvalidArgument, codes.NotFound:
+	case codes.InvalidArgument, codes.NotFound, codes.PermissionDenied, codes.Unauthenticated:
 		return true
 	default:
 		return false
@@ -715,7 +782,121 @@ func isPermanentError(err error) bool {
 // SetupWithManager sets up the controller with the Manager.
 func (r *ZarfPackageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.recorder = mgr.GetEventRecorderFor("zarfpackage-controller")
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &opsv1alpha1.ZarfPackage{}, registrySecretRefKey, func(raw client.Object) []string {
+		zarfPkg, ok := raw.(*opsv1alpha1.ZarfPackage)
+		if !ok {
+			return nil
+		}
+		if zarfPkg.Spec.RegistryCredentialSecretRef == "" {
+			return nil
+		}
+		return []string{zarfPkg.Spec.RegistryCredentialSecretRef}
+	}); err != nil {
+		return err
+	}
+
+	annotationPredicate := predicate.Funcs{
+		CreateFunc:  func(_ event.CreateEvent) bool { return true },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
+		GenericFunc: func(_ event.GenericEvent) bool { return true },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+				return true
+			}
+			return e.ObjectOld.GetAnnotations()[AnnotationRedeploy] != e.ObjectNew.GetAnnotations()[AnnotationRedeploy]
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&opsv1alpha1.ZarfPackage{}).
+		For(&opsv1alpha1.ZarfPackage{}, builder.WithPredicates(annotationPredicate)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.requestsForRegistrySecret)).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: r.maxConcurrentReconciles(),
+			RateLimiter:             buildRateLimiter(),
+		}).
 		Complete(r)
+}
+
+func (r *ZarfPackageReconciler) maxConcurrentReconciles() int {
+	if r.MaxConcurrentReconciles <= 0 {
+		return 1
+	}
+	return r.MaxConcurrentReconciles
+}
+
+func (r *ZarfPackageReconciler) requestsForRegistrySecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	var list opsv1alpha1.ZarfPackageList
+	if err := r.List(ctx, &list, client.InNamespace(secret.Namespace), client.MatchingFields{registrySecretRefKey: secret.Name}); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to map Secret to ZarfPackage list", "secret", secret.Name, "namespace", secret.Namespace)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+		})
+	}
+	return requests
+}
+
+func (r *ZarfPackageReconciler) getZarfClient() zarf.Client {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ZarfClient
+}
+
+func (r *ZarfPackageReconciler) SetZarfClient(zarfClient zarf.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ZarfClient = zarfClient
+}
+
+func (r *ZarfPackageReconciler) recordResourceMetrics(zarfPkg *opsv1alpha1.ZarfPackage) {
+	if zarfPkg == nil {
+		return
+	}
+	phases := []opsv1alpha1.ZarfPackagePhase{
+		opsv1alpha1.ZarfPackagePhasePending,
+		opsv1alpha1.ZarfPackagePhaseDeploying,
+		opsv1alpha1.ZarfPackagePhaseDeployed,
+		opsv1alpha1.ZarfPackagePhaseFailed,
+		opsv1alpha1.ZarfPackagePhaseRemoving,
+	}
+	for _, phase := range phases {
+		value := 0.0
+		if zarfPkg.Status.Phase == phase {
+			value = 1
+		}
+		phaseMetric.WithLabelValues(zarfPkg.Namespace, zarfPkg.Name, string(phase)).Set(value)
+	}
+}
+
+func (r *ZarfPackageReconciler) observeDeployDuration(start time.Time, result string) {
+	deployDurationMetric.WithLabelValues(result).Observe(time.Since(start).Seconds())
+}
+
+func (r *ZarfPackageReconciler) recordFailureMetric(reason string) {
+	failureMetric.WithLabelValues(reason).Inc()
+}
+
+func (r *ZarfPackageReconciler) setSuspendedMetric(zarfPkg *opsv1alpha1.ZarfPackage, suspended bool) {
+	value := 0.0
+	if suspended {
+		value = 1
+	}
+	suspendedMetric.WithLabelValues(zarfPkg.Namespace, zarfPkg.Name).Set(value)
+}
+
+func init() {
+	ctrlmetrics.Registry.MustRegister(
+		phaseMetric,
+		deployDurationMetric,
+		failureMetric,
+		driftDetectedMetric,
+		suspendedMetric,
+	)
 }

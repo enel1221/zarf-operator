@@ -20,8 +20,11 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -47,6 +50,7 @@ import (
 
 	opsv1alpha1 "github.com/enel1221/zarf-operator/api/v1alpha1"
 	"github.com/enel1221/zarf-operator/internal/controller"
+	"github.com/enel1221/zarf-operator/pkg/zarf"
 	zarfgrpc "github.com/enel1221/zarf-operator/pkg/zarf/grpc"
 	// +kubebuilder:scaffold:imports
 )
@@ -75,6 +79,7 @@ func main() {
 	var enableWebhooks bool
 	var zarfSidecarAddr string
 	var requeueInterval time.Duration
+	var concurrent int
 	var otlpEndpoint string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -100,6 +105,8 @@ func main() {
 		"The address of the Zarf sidecar gRPC server")
 	flag.DurationVar(&requeueInterval, "requeue-interval", 5*time.Minute,
 		"The interval at which to requeue ZarfPackage resources for reconciliation")
+	flag.IntVar(&concurrent, "concurrent", 5,
+		"The maximum number of concurrent ZarfPackage reconciles")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "",
 		"OTLP trace exporter endpoint (empty disables tracing)")
 	opts := zap.Options{
@@ -227,7 +234,7 @@ func main() {
 		// the manager stops, so would be fine to enable this option. However,
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		LeaderElectionReleaseOnCancel: true,
 	}
 
 	if enableWebhooks {
@@ -240,26 +247,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect to Zarf sidecar
-	setupLog.Info("connecting to zarf sidecar", "address", zarfSidecarAddr)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	zarfClient, err := zarfgrpc.NewClient(ctx, zarfSidecarAddr)
-	if err != nil {
-		setupLog.Error(err, "unable to connect to zarf sidecar - controller will wait for sidecar")
-		// Don't exit - the controller will handle nil client gracefully
-		zarfClient = nil
+	reconciler := &controller.ZarfPackageReconciler{
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		RequeueInterval:         requeueInterval,
+		MaxConcurrentReconciles: concurrent,
 	}
 
-	if err = (&controller.ZarfPackageReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("ZarfPackage"),
-		ZarfClient:      zarfClient,
-		RequeueInterval: requeueInterval,
-	}).SetupWithManager(mgr); err != nil {
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ZarfPackage")
+		os.Exit(1)
+	}
+
+	sidecarMonitor := newSidecarConnectionMonitor(zarfSidecarAddr, reconciler)
+	if err := mgr.Add(sidecarMonitor); err != nil {
+		setupLog.Error(err, "unable to add sidecar connection monitor")
 		os.Exit(1)
 	}
 
@@ -291,7 +293,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", sidecarMonitor.ReadyzCheck); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -322,3 +324,90 @@ func initTracerProvider(endpoint, serviceName string) (*sdktrace.TracerProvider,
 	otel.SetTracerProvider(tp)
 	return tp, nil
 }
+
+type sidecarConnectionMonitor struct {
+	address    string
+	reconciler *controller.ZarfPackageReconciler
+
+	mu     sync.RWMutex
+	client *zarfgrpc.Client
+}
+
+func newSidecarConnectionMonitor(address string, reconciler *controller.ZarfPackageReconciler) *sidecarConnectionMonitor {
+	return &sidecarConnectionMonitor{
+		address:    address,
+		reconciler: reconciler,
+	}
+}
+
+func (m *sidecarConnectionMonitor) Start(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		m.ensureConnection(ctx)
+		select {
+		case <-ctx.Done():
+			m.closeClient()
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *sidecarConnectionMonitor) ReadyzCheck(_ *http.Request) error {
+	client := m.getClient()
+	if client == nil {
+		return fmt.Errorf("zarf sidecar client not connected")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("zarf sidecar not ready: %w", err)
+	}
+	return nil
+}
+
+func (m *sidecarConnectionMonitor) ensureConnection(ctx context.Context) {
+	client := m.getClient()
+	if client != nil {
+		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := client.HealthCheck(checkCtx)
+		cancel()
+		if err == nil {
+			return
+		}
+		setupLog.Error(err, "lost sidecar connectivity; reconnecting")
+		m.closeClient()
+		m.reconciler.SetZarfClient(nil)
+	}
+
+	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	newClient, err := zarfgrpc.NewClient(connectCtx, m.address)
+	if err != nil {
+		setupLog.V(1).Info("sidecar not available yet", "address", m.address, "error", err)
+		return
+	}
+	m.mu.Lock()
+	m.client = newClient
+	m.mu.Unlock()
+	m.reconciler.SetZarfClient(newClient)
+	setupLog.Info("connected to zarf sidecar", "address", m.address)
+}
+
+func (m *sidecarConnectionMonitor) getClient() *zarfgrpc.Client {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.client
+}
+
+func (m *sidecarConnectionMonitor) closeClient() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.client != nil {
+		_ = m.client.Close()
+		m.client = nil
+	}
+}
+
+var _ zarf.Client = (*zarfgrpc.Client)(nil)

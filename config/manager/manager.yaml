@@ -44,6 +44,7 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --zarf-sidecar-address=localhost:50051
+          - --concurrent=5
         image: controller:latest
         name: manager
         ports: []

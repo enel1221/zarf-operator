@@ -162,6 +162,20 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyControllerUp).Should(Succeed())
 		})
 
+		It("should run manager with configured concurrent reconcile workers", func() {
+			By("verifying manager container args include --concurrent=5")
+			verifyConcurrentArg := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment",
+					"zarf-operator-controller-manager",
+					"-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.containers[?(@.name=='manager')].args}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("--concurrent=5"))
+			}
+			Eventually(verifyConcurrentArg).Should(Succeed())
+		})
+
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for metrics access")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,

@@ -232,9 +232,6 @@ const (
 	// ConditionTypeReady indicates the package is ready
 	ConditionTypeReady ZarfPackageConditionType = "Ready"
 
-	// ConditionTypeSynced indicates the package is synced with the cluster
-	ConditionTypeSynced ZarfPackageConditionType = "Synced"
-
 	// ConditionTypeProgressing indicates deployment is in progress
 	ConditionTypeProgressing ZarfPackageConditionType = "Progressing"
 
@@ -243,25 +240,10 @@ const (
 
 	// ConditionTypeSuspended indicates reconciliation is suspended
 	ConditionTypeSuspended ZarfPackageConditionType = "Suspended"
+
+	// ConditionTypeStalled indicates reconciliation is blocked on user action or terminal retries.
+	ConditionTypeStalled ZarfPackageConditionType = "Stalled"
 )
-
-// ZarfPackageCondition represents a condition of the ZarfPackage
-type ZarfPackageCondition struct {
-	// Type of condition
-	Type ZarfPackageConditionType `json:"type"`
-
-	// Status of the condition (True, False, Unknown)
-	Status metav1.ConditionStatus `json:"status"`
-
-	// Reason is a machine-readable reason for the condition
-	Reason string `json:"reason,omitempty"`
-
-	// Message is a human-readable description
-	Message string `json:"message,omitempty"`
-
-	// LastTransitionTime is when the condition last changed
-	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
-}
 
 // ZarfPackageStatus defines the observed state of ZarfPackage.
 type ZarfPackageStatus struct {
@@ -269,7 +251,11 @@ type ZarfPackageStatus struct {
 	Phase ZarfPackagePhase `json:"phase,omitempty"`
 
 	// Conditions represent the latest observations
-	Conditions []ZarfPackageCondition `json:"conditions,omitempty"`
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// DeployedVersion is the version of the deployed package
 	DeployedVersion string `json:"deployedVersion,omitempty"`

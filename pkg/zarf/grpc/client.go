@@ -3,12 +3,15 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/enel1221/zarf-operator/pkg/zarf"
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -25,15 +28,47 @@ func NewClient(ctx context.Context, address string) (*Client, error) {
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  1 * time.Second,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   30 * time.Second,
+			},
+			MinConnectTimeout: 5 * time.Second,
+		}),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to zarf sidecar: %w", err)
 	}
+	conn.Connect()
 
-	return &Client{
+	client := &Client{
 		conn:   conn,
 		client: zarfv1.NewZarfServiceClient(conn),
-	}, nil
+	}
+	if err := client.HealthCheck(ctx); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("sidecar health check failed: %w", err)
+	}
+	return client, nil
+}
+
+// HealthCheck verifies sidecar connectivity and readiness.
+func (c *Client) HealthCheck(ctx context.Context) error {
+	resp, err := c.client.Health(ctx, &zarfv1.HealthRequest{})
+	if err != nil {
+		return err
+	}
+	if !resp.GetHealthy() {
+		return fmt.Errorf("sidecar unhealthy: %s", resp.GetMessage())
+	}
+	return nil
 }
 
 // Deploy deploys a Zarf package

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc/codes"
@@ -31,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -38,6 +38,31 @@ import (
 	"github.com/enel1221/zarf-operator/pkg/zarf"
 	"github.com/enel1221/zarf-operator/pkg/zarf/fake"
 )
+
+type failingStatusClient struct {
+	client.Client
+	statusErr error
+}
+
+func (c *failingStatusClient) Status() client.SubResourceWriter {
+	return &failingStatusWriter{
+		SubResourceWriter: c.Client.Status(),
+		err:               c.statusErr,
+	}
+}
+
+type failingStatusWriter struct {
+	client.SubResourceWriter
+	err error
+}
+
+func (w *failingStatusWriter) Update(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+	return w.err
+}
+
+func (w *failingStatusWriter) Patch(_ context.Context, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+	return w.err
+}
 
 var _ = Describe("ZarfPackage Controller", func() {
 	ctx := context.Background()
@@ -47,7 +72,6 @@ var _ = Describe("ZarfPackage Controller", func() {
 		return &ZarfPackageReconciler{
 			Client:          k8sClient,
 			Scheme:          k8sClient.Scheme(),
-			Log:             logr.Discard(),
 			ZarfClient:      zc,
 			RequeueInterval: 5 * time.Minute,
 			recorder:        record.NewFakeRecorder(100),
@@ -88,9 +112,9 @@ var _ = Describe("ZarfPackage Controller", func() {
 		return obj
 	}
 
-	findCondition := func(conditions []opsv1alpha1.ZarfPackageCondition, condType opsv1alpha1.ZarfPackageConditionType) *opsv1alpha1.ZarfPackageCondition {
+	findCondition := func(conditions []metav1.Condition, condType opsv1alpha1.ZarfPackageConditionType) *metav1.Condition {
 		for i := range conditions {
-			if conditions[i].Type == condType {
+			if conditions[i].Type == string(condType) {
 				return &conditions[i]
 			}
 		}
@@ -147,7 +171,6 @@ var _ = Describe("ZarfPackage Controller", func() {
 			reconciler := &ZarfPackageReconciler{
 				Client:          k8sClient,
 				Scheme:          k8sClient.Scheme(),
-				Log:             logr.Discard(),
 				ZarfClient:      fakeZarf,
 				RequeueInterval: 5 * time.Minute,
 				recorder:        rec,
@@ -251,7 +274,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(updated.Status.LastFailureTime).NotTo(BeNil())
 		})
 
-		It("should not requeue on permanent deploy error", func() {
+		It("should requeue at the standard interval on user-recoverable deploy error", func() {
 			nn := createResource("deploy-permanent-fail-pkg", true, "oci://example.com/pkg:v1")
 
 			fakeZarf := fake.New().
@@ -261,7 +284,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			reconciler := newReconciler(fakeZarf)
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 
 			updated := getResource(nn)
 			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
@@ -269,6 +292,105 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Reason).To(Equal(ReasonDeployFailed))
 			Expect(updated.Status.FailureCount).To(Equal(int32(0)))
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonDeployFailed)
+		})
+
+		It("should keep scheduled requeue when status update fails after reconcile result is set", func() {
+			nn := createResource("status-update-fail-with-result-pkg", true, "oci://example.com/pkg:v1")
+
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeploy(nil, fmt.Errorf("temporary network failure"))
+
+			reconciler := &ZarfPackageReconciler{
+				Client: &failingStatusClient{
+					Client:    k8sClient,
+					statusErr: fmt.Errorf("status update failed"),
+				},
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		})
+
+		It("should handle deploy gRPC error codes with correct requeue and status behavior", func() {
+			testCases := []struct {
+				name               string
+				code               codes.Code
+				expectStdInterval  bool
+				expectFailureCount int32
+			}{
+				{
+					name:               "invalid-argument-user-recoverable",
+					code:               codes.InvalidArgument,
+					expectStdInterval:  true,
+					expectFailureCount: 0,
+				},
+				{
+					name:               "not-found-user-recoverable",
+					code:               codes.NotFound,
+					expectStdInterval:  true,
+					expectFailureCount: 0,
+				},
+				{
+					name:               "permission-denied-user-recoverable",
+					code:               codes.PermissionDenied,
+					expectStdInterval:  true,
+					expectFailureCount: 0,
+				},
+				{
+					name:               "unauthenticated-user-recoverable",
+					code:               codes.Unauthenticated,
+					expectStdInterval:  true,
+					expectFailureCount: 0,
+				},
+				{
+					name:               "unavailable-transient",
+					code:               codes.Unavailable,
+					expectStdInterval:  false,
+					expectFailureCount: 1,
+				},
+			}
+
+			for _, tc := range testCases {
+				nn := createResource(fmt.Sprintf("deploy-code-%s", tc.name), true, "oci://example.com/pkg:v1")
+				rec := record.NewFakeRecorder(100)
+				fakeZarf := fake.New().
+					WithGetDeployedPackage(nil, nil).
+					WithDeploy(nil, status.Error(tc.code, "deploy failed for test case"))
+
+				reconciler := &ZarfPackageReconciler{
+					Client:          k8sClient,
+					Scheme:          k8sClient.Scheme(),
+					ZarfClient:      fakeZarf,
+					RequeueInterval: 5 * time.Minute,
+					recorder:        rec,
+				}
+
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred(), tc.name)
+				if tc.expectStdInterval {
+					Expect(result.RequeueAfter).To(Equal(5*time.Minute), tc.name)
+				} else {
+					Expect(result.RequeueAfter).To(BeNumerically(">=", 2*backoffBaseInterval), tc.name)
+					Expect(result.RequeueAfter).To(BeNumerically("<", 2*backoffBaseInterval+backoffMaxJitter), tc.name)
+				}
+
+				updated := getResource(nn)
+				Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed), tc.name)
+				ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+				Expect(ready).NotTo(BeNil(), tc.name)
+				Expect(ready.Reason).To(Equal(ReasonDeployFailed), tc.name)
+				Expect(updated.Status.FailureCount).To(Equal(tc.expectFailureCount), tc.name)
+
+				expectEventReason(rec, ReasonDeployFailed)
+			}
 		})
 
 		It("should requeue when sidecar is unavailable", func() {
@@ -278,7 +400,6 @@ var _ = Describe("ZarfPackage Controller", func() {
 			reconciler := &ZarfPackageReconciler{
 				Client:          k8sClient,
 				Scheme:          k8sClient.Scheme(),
-				Log:             logr.Discard(),
 				ZarfClient:      nil,
 				RequeueInterval: 5 * time.Minute,
 				recorder:        rec,
@@ -296,6 +417,30 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(ReasonReconciling))
 			Expect(updated.Status.FailureCount).To(Equal(int32(1)))
+		})
+
+		It("should call deploy with context timeout from spec timeout plus one minute buffer", func() {
+			nn := createResource("deploy-timeout-pkg", true, "oci://example.com/pkg:v1")
+
+			obj := getResource(nn)
+			obj.Spec.Timeout = "2m"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var observed time.Duration
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(c context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deadline, ok := c.Deadline()
+					Expect(ok).To(BeTrue())
+					observed = time.Until(deadline)
+					return nil, status.Error(codes.Unavailable, "temporary deploy failure")
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(observed).To(BeNumerically(">", 2*time.Minute+30*time.Second))
+			Expect(observed).To(BeNumerically("<", 3*time.Minute+30*time.Second))
 		})
 
 		It("should refresh status from deployed package when already deployed", func() {
@@ -367,7 +512,6 @@ var _ = Describe("ZarfPackage Controller", func() {
 			reconciler := &ZarfPackageReconciler{
 				Client:          k8sClient,
 				Scheme:          k8sClient.Scheme(),
-				Log:             logr.Discard(),
 				ZarfClient:      fakeZarf,
 				RequeueInterval: 5 * time.Minute,
 				recorder:        rec,
@@ -457,7 +601,6 @@ var _ = Describe("ZarfPackage Controller", func() {
 			reconciler := &ZarfPackageReconciler{
 				Client:          k8sClient,
 				Scheme:          k8sClient.Scheme(),
-				Log:             logr.Discard(),
 				ZarfClient:      fakeZarf,
 				RequeueInterval: 5 * time.Minute,
 				recorder:        rec,
@@ -587,9 +730,57 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(ReasonRemoveFailed))
 			Expect(updated.Status.FailureCount).To(Equal(int32(1)))
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonRemoveFailed)
 		})
 
-		It("should stop retrying after max retries are exceeded", func() {
+		It("should call remove with fixed sixteen minute timeout", func() {
+			nn := createResource("delete-timeout-pkg", true, "oci://example.com/pkg:v1")
+
+			obj := getResource(nn)
+			obj.Status.PackageName = "pkg-to-remove"
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+
+			var observed time.Duration
+			fakeZarf := fake.New()
+			fakeZarf.RemoveFn = func(c context.Context, _ zarf.RemoveOptions) error {
+				deadline, ok := c.Deadline()
+				Expect(ok).To(BeTrue())
+				observed = time.Until(deadline)
+				return status.Error(codes.Unavailable, "temporary remove failure")
+			}
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(observed).To(BeNumerically(">", 15*time.Minute+30*time.Second))
+			Expect(observed).To(BeNumerically("<", 16*time.Minute+30*time.Second))
+		})
+
+		It("should treat remove not-found as successful cleanup and clear finalizer", func() {
+			nn := createResource("delete-recoverable-fail-pkg", true, "oci://example.com/pkg:v1")
+
+			obj := getResource(nn)
+			obj.Status.PackageName = "pkg-to-remove"
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			fakeZarf := fake.New().WithRemove(status.Error(codes.NotFound, "package missing"))
+			reconciler := newReconciler(fakeZarf)
+
+			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+
+			Eventually(func() bool {
+				lookup := &opsv1alpha1.ZarfPackage{}
+				err := k8sClient.Get(ctx, nn, lookup)
+				return errors.IsNotFound(err)
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+		})
+
+		It("should requeue at the standard interval after max retries are exceeded", func() {
 			nn := createResource("max-retries-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
@@ -604,7 +795,6 @@ var _ = Describe("ZarfPackage Controller", func() {
 			reconciler := &ZarfPackageReconciler{
 				Client:          k8sClient,
 				Scheme:          k8sClient.Scheme(),
-				Log:             logr.Discard(),
 				ZarfClient:      fakeZarf,
 				RequeueInterval: 5 * time.Minute,
 				recorder:        rec,
@@ -618,7 +808,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 
 			updated := getResource(nn)
 			Expect(updated.Status.FailureCount).To(Equal(int32(3)))
@@ -646,6 +836,45 @@ var _ = Describe("ZarfPackage Controller", func() {
 		It("should cap at max interval plus jitter", func() {
 			d := calculateBackoff(100)
 			Expect(d).To(BeNumerically("<=", backoffMaxInterval+backoffMaxJitter))
+		})
+	})
+
+	Context("User recoverable error classification", func() {
+		It("should treat permission denied as permanent", func() {
+			Expect(isUserRecoverableError(status.Error(codes.PermissionDenied, "forbidden"))).To(BeTrue())
+		})
+
+		It("should treat unauthenticated as permanent", func() {
+			Expect(isUserRecoverableError(status.Error(codes.Unauthenticated, "missing auth"))).To(BeTrue())
+		})
+
+		It("should treat unavailable as transient", func() {
+			Expect(isUserRecoverableError(status.Error(codes.Unavailable, "temporary"))).To(BeFalse())
+		})
+	})
+
+	Context("Controller rate limiter", func() {
+		It("should apply at least one second backoff per failing item", func() {
+			rl := buildRateLimiter()
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "pkg-a", Namespace: "default"}}
+
+			first := rl.When(req)
+			second := rl.When(req)
+
+			Expect(first).To(BeNumerically(">=", time.Second))
+			Expect(second).To(BeNumerically(">", first))
+		})
+	})
+
+	Context("Controller concurrency", func() {
+		It("should default max concurrent reconciles to one when unset", func() {
+			reconciler := &ZarfPackageReconciler{}
+			Expect(reconciler.maxConcurrentReconciles()).To(Equal(1))
+		})
+
+		It("should use configured max concurrent reconciles", func() {
+			reconciler := &ZarfPackageReconciler{MaxConcurrentReconciles: 5}
+			Expect(reconciler.maxConcurrentReconciles()).To(Equal(5))
 		})
 	})
 

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -56,7 +57,28 @@ func TestE2E(t *testing.T) {
 	RunSpecs(t, "e2e suite")
 }
 
+func kindClusterExists(name string) bool {
+	cmd := exec.Command("kind", "get", "clusters")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return false
+	}
+
+	for _, cluster := range utils.GetNonEmptyLines(output) {
+		if strings.TrimSpace(cluster) == name {
+			return true
+		}
+	}
+
+	return false
+}
+
 var _ = BeforeSuite(func() {
+	kindCluster := "kind"
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok && strings.TrimSpace(v) != "" {
+		kindCluster = v
+	}
+
 	By("building the manager (operator) image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
 	_, err := utils.Run(cmd)
@@ -66,6 +88,21 @@ var _ = BeforeSuite(func() {
 	cmd = exec.Command("make", "docker-build-sidecar", fmt.Sprintf("SIDECAR_IMG=%s", sidecarImage))
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the sidecar image")
+
+	if !kindClusterExists(kindCluster) {
+		By("bootstrapping Kind e2e infrastructure")
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"Kind cluster %q not found; running make e2e-setup for test prerequisites\n", kindCluster)
+		cmd = exec.Command(
+			"make",
+			"e2e-setup",
+			fmt.Sprintf("E2E_KIND_CLUSTER=%s", kindCluster),
+			fmt.Sprintf("IMG=%s", projectImage),
+			fmt.Sprintf("SIDECAR_IMG=%s", sidecarImage),
+		)
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to bootstrap Kind e2e infrastructure")
+	}
 
 	By("loading the manager image into Kind")
 	err = utils.LoadImageToKindClusterWithName(projectImage)

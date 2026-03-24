@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +33,7 @@ type ZarfServer struct {
 	baseConfig logger.Config
 	version    string
 	cachePath  string
+	deployMu   sync.Mutex
 }
 
 func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version string) *ZarfServer {
@@ -96,6 +99,14 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		return nil, status.Error(codes.InvalidArgument, "source is required")
 	}
 
+	log.Debug("waiting for deploy lock")
+	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
+	log.Debug("acquired deploy lock")
+	if err := ctx.Err(); err != nil {
+		return nil, status.Errorf(codes.DeadlineExceeded, "request canceled while waiting for deploy lock: %v", err)
+	}
+
 	// Apply Zarf defaults for headless operation
 	if req.Retries == 0 {
 		req.Retries = 3
@@ -156,7 +167,21 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 				_ = os.Unsetenv("DOCKER_CONFIG")
 			}
 		}()
-		log.Info("configured registry credentials from secret", "dockerConfigDir", tmpDir)
+		// Log which registries have credentials configured (for debugging, never log the actual creds)
+		var dockerCfg struct {
+			Auths map[string]json.RawMessage `json:"auths"`
+		}
+		if err := json.Unmarshal(req.RegistryCredentialJson, &dockerCfg); err == nil && len(dockerCfg.Auths) > 0 {
+			hosts := make([]string, 0, len(dockerCfg.Auths))
+			for h := range dockerCfg.Auths {
+				hosts = append(hosts, h)
+			}
+			log.Info("configured registry credentials from secret", "dockerConfigDir", tmpDir, "registryHosts", hosts)
+		} else {
+			log.Warn("registry credential JSON provided but no auths entries found", "dockerConfigDir", tmpDir)
+		}
+	} else {
+		log.Debug("no registry credentials provided, using default credential resolution")
 	}
 
 	// Load the package
@@ -179,7 +204,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	pkgLayout, err := packager.LoadPackage(ctx, req.Source, loadOpts)
 	if err != nil {
 		log.Error("failed to load package", "error", err, "source", req.Source)
-		return nil, status.Errorf(codes.Internal, "failed to load package: %v", err)
+		return nil, status.Errorf(classifyOCIError(err), "failed to load package: %v", err)
 	}
 	defer func() {
 		if err := pkgLayout.Cleanup(); err != nil {
@@ -328,6 +353,14 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 		return nil, status.Error(codes.InvalidArgument, "package_name is required")
 	}
 
+	log.Debug("waiting for remove lock")
+	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
+	log.Debug("acquired remove lock")
+	if err := ctx.Err(); err != nil {
+		return nil, status.Errorf(codes.DeadlineExceeded, "request canceled while waiting for remove lock: %v", err)
+	}
+
 	// Connect to cluster
 	c, err := cluster.New(ctx)
 	if err != nil {
@@ -468,6 +501,28 @@ func convertPackageInfo(pkg *state.DeployedPackage) *zarfv1.PackageInfo {
 		CliVersion:         pkg.CLIVersion,
 		DeployedComponents: components,
 		NamespaceOverride:  pkg.NamespaceOverride,
+	}
+}
+
+func classifyOCIError(err error) codes.Code {
+	if err == nil {
+		return codes.Internal
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "401"), strings.Contains(msg, "unauthorized"):
+		return codes.Unauthenticated
+	case strings.Contains(msg, "credential"):
+		return codes.Unauthenticated
+	case strings.Contains(msg, "403"), strings.Contains(msg, "forbidden"), strings.Contains(msg, "denied"):
+		return codes.PermissionDenied
+	case strings.Contains(msg, "signature verification failed"), strings.Contains(msg, "not signed"):
+		return codes.InvalidArgument
+	case strings.Contains(msg, "404"), strings.Contains(msg, "not found"):
+		return codes.NotFound
+	default:
+		return codes.Internal
 	}
 }
 

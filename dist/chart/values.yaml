@@ -1,6 +1,7 @@
 # [MANAGER]: Manager Deployment Configurations
 controllerManager:
   replicas: 1
+  concurrent: 5
   container:
     image:
       repository: ghcr.io/enel1221/zarf-operator
