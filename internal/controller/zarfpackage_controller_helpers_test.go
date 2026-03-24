@@ -109,7 +109,7 @@ func TestRetryDeployAfterHelmRecovery(t *testing.T) {
 
 func TestPreDeployCleanupIgnoresNotFoundRemove(t *testing.T) {
 	removeCalls := 0
-	fakeZarf := fake.New()
+	fakeZarf := fake.New().AddDeployedPackage(&zarf.PackageInfo{Name: "pkg"})
 	fakeZarf.RemoveFn = func(context.Context, zarf.RemoveOptions) error {
 		removeCalls++
 		return status.Error(codes.NotFound, "not found")
@@ -126,6 +126,28 @@ func TestPreDeployCleanupIgnoresNotFoundRemove(t *testing.T) {
 	r.preDeployCleanup(context.Background(), logr.Discard(), pkg, fakeZarf)
 	if removeCalls != 1 {
 		t.Fatalf("expected one remove call, got %d", removeCalls)
+	}
+}
+
+func TestPreDeployCleanupSkipsRemoveWhenPackageStateMissing(t *testing.T) {
+	removeCalls := 0
+	fakeZarf := fake.New()
+	fakeZarf.RemoveFn = func(context.Context, zarf.RemoveOptions) error {
+		removeCalls++
+		return nil
+	}
+
+	r := &ZarfPackageReconciler{}
+	pkg := &opsv1alpha1.ZarfPackage{
+		ObjectMeta: metav1.ObjectMeta{Name: "pkg", Namespace: "default"},
+		Status: opsv1alpha1.ZarfPackageStatus{
+			PackageName: "pkg",
+		},
+	}
+
+	r.preDeployCleanup(context.Background(), logr.Discard(), pkg, fakeZarf)
+	if removeCalls != 0 {
+		t.Fatalf("expected no remove calls when deployed state is missing, got %d", removeCalls)
 	}
 }
 

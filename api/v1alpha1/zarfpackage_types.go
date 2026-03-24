@@ -310,6 +310,12 @@ type ZarfPackageStatus struct {
 	// Used to detect when a redeployment is needed (follows Flux's lastAttemptedConfigDigest pattern)
 	DeployedSpecHash string `json:"deployedSpecHash,omitempty"`
 
+	// LastAttemptedRevision is the source revision last attempted by the controller.
+	LastAttemptedRevision string `json:"lastAttemptedRevision,omitempty"`
+
+	// LastAttemptError is the most recent deployment error message.
+	LastAttemptError string `json:"lastAttemptError,omitempty"`
+
 	// FailureCount tracks consecutive reconciliation failures for backoff calculation.
 	// +optional
 	FailureCount int32 `json:"failureCount,omitempty"`

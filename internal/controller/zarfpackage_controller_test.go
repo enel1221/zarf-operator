@@ -64,6 +64,36 @@ func (w *failingStatusWriter) Patch(_ context.Context, _ client.Object, _ client
 	return w.err
 }
 
+type lookupCountingClient struct {
+	delegate             zarf.Client
+	getDeployedCallCount int
+}
+
+func (c *lookupCountingClient) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+	return c.delegate.Deploy(ctx, opts)
+}
+
+func (c *lookupCountingClient) Remove(ctx context.Context, opts zarf.RemoveOptions) error {
+	return c.delegate.Remove(ctx, opts)
+}
+
+func (c *lookupCountingClient) GetDeployedPackage(ctx context.Context, packageName string) (*zarf.PackageInfo, error) {
+	c.getDeployedCallCount++
+	return c.delegate.GetDeployedPackage(ctx, packageName)
+}
+
+func (c *lookupCountingClient) ListDeployedPackages(ctx context.Context) ([]zarf.PackageInfo, error) {
+	return c.delegate.ListDeployedPackages(ctx)
+}
+
+func (c *lookupCountingClient) GetPackageMetadata(ctx context.Context, source string) (*zarf.PackageMetadata, error) {
+	return c.delegate.GetPackageMetadata(ctx, source)
+}
+
+func (c *lookupCountingClient) Close() error {
+	return c.delegate.Close()
+}
+
 var _ = Describe("ZarfPackage Controller", func() {
 	ctx := context.Background()
 	const (
@@ -136,6 +166,23 @@ var _ = Describe("ZarfPackage Controller", func() {
 	}
 
 	Context("Deploy behavior", func() {
+		It("should skip deployed package lookup when package name is empty", func() {
+			nn := createResource("empty-name-skip-lookup", false, "oci://example.com/pkg:v1")
+
+			baseFake := fake.New().
+				WithPackageMetadata(&zarf.PackageMetadata{Name: testPackageName, Version: "v1"}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+				})
+
+			countingClient := &lookupCountingClient{delegate: baseFake}
+			reconciler := newReconciler(countingClient)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(countingClient.getDeployedCallCount).To(Equal(0))
+		})
+
 		It("should deploy a fresh ZarfPackage with no existing hash", func() {
 			nn := createResource("fresh-pkg", false, "oci://example.com/pkg:v1")
 
@@ -258,6 +305,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("deploy-fail-pkg", true, "oci://example.com/pkg:v1")
 
 			fakeZarf := fake.New().
+				WithPackageMetadata(&zarf.PackageMetadata{Name: testPackageName, Version: "v1"}, nil).
 				WithGetDeployedPackage(nil, nil).
 				WithDeploy(nil, fmt.Errorf("connection refused"))
 
@@ -269,6 +317,9 @@ var _ = Describe("ZarfPackage Controller", func() {
 
 			updated := getResource(nn)
 			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+			Expect(updated.Status.PackageName).To(Equal(testPackageName))
+			Expect(updated.Status.LastAttemptedRevision).To(Equal("oci://example.com/pkg:v1"))
+			Expect(updated.Status.LastAttemptError).To(ContainSubstring("connection refused"))
 			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))

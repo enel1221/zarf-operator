@@ -297,10 +297,23 @@ func (r *ZarfPackageReconciler) reconcile(
 	zarfClient zarf.Client,
 	original *opsv1alpha1.ZarfPackage,
 ) (ctrl.Result, error) {
-	// Check current deployment state
-	deployedPkg, err := zarfClient.GetDeployedPackage(ctx, zarfPkg.Status.PackageName)
-	if err != nil {
-		log.Error(err, "failed to get deployed package state")
+	// Check current deployment state only when package name is known.
+	var (
+		deployedPkg *zarf.PackageInfo
+		err         error
+	)
+	if strings.TrimSpace(zarfPkg.Status.PackageName) != "" {
+		deployedPkg, err = zarfClient.GetDeployedPackage(ctx, zarfPkg.Status.PackageName)
+		if err != nil {
+			st := status.Convert(err)
+			if st.Code() == codes.NotFound {
+				log.V(1).Info("deployed package state not found", "package", zarfPkg.Status.PackageName)
+			} else {
+				log.Error(err, "failed to get deployed package state")
+			}
+		}
+	} else {
+		log.V(1).Info("skipping deployed state lookup because package name is not known yet")
 	}
 
 	// Determine if we need to deploy or update
@@ -520,6 +533,16 @@ func (r *ZarfPackageReconciler) deploy(
 	wasFailed := zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseFailed
 
 	log.Info("deploying package", "source", zarfPkg.Spec.Source)
+	zarfPkg.Status.LastAttemptedRevision = zarfPkg.Spec.Source
+
+	if strings.TrimSpace(zarfPkg.Status.PackageName) == "" {
+		metadata, metadataErr := zarfClient.GetPackageMetadata(ctx, zarfPkg.Spec.Source)
+		if metadataErr != nil {
+			log.V(1).Info("failed to resolve package metadata before deploy", "source", zarfPkg.Spec.Source, "error", metadataErr.Error())
+		} else if metadata != nil && strings.TrimSpace(metadata.Name) != "" {
+			zarfPkg.Status.PackageName = metadata.Name
+		}
+	}
 
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
@@ -609,12 +632,16 @@ func (r *ZarfPackageReconciler) deploy(
 		r.observeDeployDuration(deployStart, "failure")
 		log.Error(err, "deployment failed")
 		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+		zarfPkg.Status.LastAttemptError = truncateMessage(err.Error(), 512)
+		var deployErr *zarf.DeployError
+		if errors.As(err, &deployErr) {
+			r.markFailedComponentStatus(zarfPkg, deployErr)
+		}
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			ReasonDeployFailed, fmt.Sprintf("Deployment failed: %v", err))
 		if r.recorder != nil {
 			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed, truncateMessage(err.Error(), 512))
-			var deployErr *zarf.DeployError
-			if errors.As(err, &deployErr) {
+			if deployErr != nil {
 				if deployErr.FailedComponent != "" {
 					r.recorder.Eventf(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed,
 						"Component %q failed (chart: %s): %s",
@@ -737,6 +764,8 @@ func (r *ZarfPackageReconciler) applyDeploySuccessStatus(zarfPkg *opsv1alpha1.Za
 	zarfPkg.Status.DeployedVersion = result.Version
 	zarfPkg.Status.DeployedGeneration = result.Generation
 	zarfPkg.Status.Source = zarfPkg.Spec.Source
+	zarfPkg.Status.LastAttemptedRevision = zarfPkg.Spec.Source
+	zarfPkg.Status.LastAttemptError = ""
 	zarfPkg.Status.ComponentStatuses = r.convertComponentStatuses(result.DeployedComponents)
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
 	zarfPkg.Status.DeployedSpecHash = zarfPkg.Spec.DeploymentHash()
@@ -813,6 +842,25 @@ func (r *ZarfPackageReconciler) preDeployCleanup(ctx context.Context, log logr.L
 		return
 	}
 
+	deployedPkg, getErr := zarfClient.GetDeployedPackage(ctx, zarfPkg.Status.PackageName)
+	if getErr != nil {
+		st := status.Convert(getErr)
+		if st.Code() == codes.NotFound {
+			log.Info("previous package state already absent during pre-deploy cleanup", "package", zarfPkg.Status.PackageName)
+			return
+		}
+		log.Error(getErr, "failed to verify package state during pre-deploy cleanup; skipping remove")
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, "PreDeployCleanupFailed",
+				truncateMessage(getErr.Error(), 512))
+		}
+		return
+	}
+	if deployedPkg == nil {
+		log.Info("previous package state absent during pre-deploy cleanup", "package", zarfPkg.Status.PackageName)
+		return
+	}
+
 	removeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -839,6 +887,37 @@ func (r *ZarfPackageReconciler) preDeployCleanup(ctx context.Context, log logr.L
 		r.recorder.Event(zarfPkg, corev1.EventTypeWarning, "PreDeployCleanupFailed",
 			truncateMessage(removeErr.Error(), 512))
 	}
+}
+
+func (r *ZarfPackageReconciler) markFailedComponentStatus(zarfPkg *opsv1alpha1.ZarfPackage, deployErr *zarf.DeployError) {
+	if deployErr == nil || strings.TrimSpace(deployErr.FailedComponent) == "" {
+		return
+	}
+
+	failed := opsv1alpha1.ComponentStatus{
+		Name:               deployErr.FailedComponent,
+		Status:             string(zarf.ComponentStatusFailed),
+		ObservedGeneration: int(zarfPkg.Generation),
+	}
+
+	if strings.TrimSpace(zarfPkg.Spec.Namespace) != "" && strings.TrimSpace(deployErr.FailedChart) != "" {
+		failed.InstalledCharts = []opsv1alpha1.InstalledChartStatus{
+			{
+				Namespace: zarfPkg.Spec.Namespace,
+				ChartName: deployErr.FailedChart,
+				Status:    string(zarf.ChartStatusFailed),
+			},
+		}
+	}
+
+	for i := range zarfPkg.Status.ComponentStatuses {
+		if zarfPkg.Status.ComponentStatuses[i].Name == failed.Name {
+			zarfPkg.Status.ComponentStatuses[i] = failed
+			return
+		}
+	}
+
+	zarfPkg.Status.ComponentStatuses = append(zarfPkg.Status.ComponentStatuses, failed)
 }
 
 func (r *ZarfPackageReconciler) cleanupStuckHelmReleases(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) int {

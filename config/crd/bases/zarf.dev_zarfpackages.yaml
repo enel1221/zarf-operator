@@ -347,6 +347,14 @@ spec:
                   for backoff calculation.
                 format: int32
                 type: integer
+              lastAttemptError:
+                description: LastAttemptError is the most recent deployment error
+                  message.
+                type: string
+              lastAttemptedRevision:
+                description: LastAttemptedRevision is the source revision last attempted
+                  by the controller.
+                type: string
               lastFailureTime:
                 description: LastFailureTime is when the last failure occurred.
                 format: date-time
