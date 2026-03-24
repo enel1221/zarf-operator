@@ -106,7 +106,10 @@ func TestClassifyDeployError(t *testing.T) {
 	}{
 		{
 			name: "helm operation in progress",
-			err:  assertErr(`unable to deploy component "helm": unable to install chart another operation (install/upgrade/rollback) is in progress`),
+			err: assertErr(
+				`unable to deploy component "helm": ` +
+					`unable to install chart another operation (install/upgrade/rollback) is in progress`,
+			),
 			want: codes.FailedPrecondition,
 		},
 		{

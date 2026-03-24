@@ -551,7 +551,9 @@ func classifyDeployError(err error) codes.Code {
 	switch {
 	case strings.Contains(msg, "another operation") && strings.Contains(msg, "in progress"):
 		return codes.FailedPrecondition
-	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timed out"), strings.Contains(msg, "timeout"):
+	case strings.Contains(msg, "context deadline exceeded"),
+		strings.Contains(msg, "timed out"),
+		strings.Contains(msg, "timeout"):
 		return codes.DeadlineExceeded
 	default:
 		return codes.Internal

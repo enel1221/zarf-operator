@@ -17,27 +17,51 @@ type mockZarfServiceClient struct {
 	deployFn func(ctx context.Context, in *zarfv1.DeployRequest) (*zarfv1.DeployResponse, error)
 }
 
-func (m *mockZarfServiceClient) Deploy(ctx context.Context, in *zarfv1.DeployRequest, _ ...grpc.CallOption) (*zarfv1.DeployResponse, error) {
+func (m *mockZarfServiceClient) Deploy(
+	ctx context.Context,
+	in *zarfv1.DeployRequest,
+	_ ...grpc.CallOption,
+) (*zarfv1.DeployResponse, error) {
 	return m.deployFn(ctx, in)
 }
 
-func (*mockZarfServiceClient) Remove(context.Context, *zarfv1.RemoveRequest, ...grpc.CallOption) (*zarfv1.RemoveResponse, error) {
+func (*mockZarfServiceClient) Remove(
+	context.Context,
+	*zarfv1.RemoveRequest,
+	...grpc.CallOption,
+) (*zarfv1.RemoveResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
 
-func (*mockZarfServiceClient) GetDeployedPackage(context.Context, *zarfv1.GetDeployedPackageRequest, ...grpc.CallOption) (*zarfv1.GetDeployedPackageResponse, error) {
+func (*mockZarfServiceClient) GetDeployedPackage(
+	context.Context,
+	*zarfv1.GetDeployedPackageRequest,
+	...grpc.CallOption,
+) (*zarfv1.GetDeployedPackageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
 
-func (*mockZarfServiceClient) ListDeployedPackages(context.Context, *zarfv1.ListDeployedPackagesRequest, ...grpc.CallOption) (*zarfv1.ListDeployedPackagesResponse, error) {
+func (*mockZarfServiceClient) ListDeployedPackages(
+	context.Context,
+	*zarfv1.ListDeployedPackagesRequest,
+	...grpc.CallOption,
+) (*zarfv1.ListDeployedPackagesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
 
-func (*mockZarfServiceClient) GetPackageMetadata(context.Context, *zarfv1.GetPackageMetadataRequest, ...grpc.CallOption) (*zarfv1.GetPackageMetadataResponse, error) {
+func (*mockZarfServiceClient) GetPackageMetadata(
+	context.Context,
+	*zarfv1.GetPackageMetadataRequest,
+	...grpc.CallOption,
+) (*zarfv1.GetPackageMetadataResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
 
-func (*mockZarfServiceClient) Health(context.Context, *zarfv1.HealthRequest, ...grpc.CallOption) (*zarfv1.HealthResponse, error) {
+func (*mockZarfServiceClient) Health(
+	context.Context,
+	*zarfv1.HealthRequest,
+	...grpc.CallOption,
+) (*zarfv1.HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
 

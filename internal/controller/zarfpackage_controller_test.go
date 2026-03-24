@@ -66,7 +66,10 @@ func (w *failingStatusWriter) Patch(_ context.Context, _ client.Object, _ client
 
 var _ = Describe("ZarfPackage Controller", func() {
 	ctx := context.Background()
-	const testPackageName = "pkg"
+	const (
+		testPackageName     = "pkg"
+		packageNameToRemove = "pkg-to-remove"
+	)
 
 	newReconciler := func(zc zarf.Client) *ZarfPackageReconciler {
 		return &ZarfPackageReconciler{
@@ -679,7 +682,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("delete-success-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg-to-remove"
+			obj.Status.PackageName = packageNameToRemove
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			removeCalled := 0
@@ -698,7 +701,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(removeCalled).To(Equal(1))
-			Expect(removePackageName).To(Equal("pkg-to-remove"))
+			Expect(removePackageName).To(Equal(packageNameToRemove))
 
 			Eventually(func() bool {
 				lookup := &opsv1alpha1.ZarfPackage{}
@@ -711,7 +714,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("delete-fail-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg-to-remove"
+			obj.Status.PackageName = packageNameToRemove
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			fakeZarf := fake.New().WithRemove(fmt.Errorf("timeout"))
@@ -738,7 +741,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("delete-timeout-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg-to-remove"
+			obj.Status.PackageName = packageNameToRemove
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
 
@@ -762,7 +765,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			nn := createResource("delete-recoverable-fail-pkg", true, "oci://example.com/pkg:v1")
 
 			obj := getResource(nn)
-			obj.Status.PackageName = "pkg-to-remove"
+			obj.Status.PackageName = packageNameToRemove
 			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 
 			fakeZarf := fake.New().WithRemove(status.Error(codes.NotFound, "package missing"))

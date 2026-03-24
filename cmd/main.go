@@ -333,7 +333,10 @@ type sidecarConnectionMonitor struct {
 	client *zarfgrpc.Client
 }
 
-func newSidecarConnectionMonitor(address string, reconciler *controller.ZarfPackageReconciler) *sidecarConnectionMonitor {
+func newSidecarConnectionMonitor(
+	address string,
+	reconciler *controller.ZarfPackageReconciler,
+) *sidecarConnectionMonitor {
 	return &sidecarConnectionMonitor{
 		address:    address,
 		reconciler: reconciler,
