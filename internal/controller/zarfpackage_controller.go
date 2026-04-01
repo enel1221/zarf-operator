@@ -78,6 +78,7 @@ const (
 	backoffMultiplier    = 2.0
 	backoffMaxJitter     = 5 * time.Second
 	dependencyRequeue    = 10 * time.Second
+	sidecarBusyRequeue   = 10 * time.Second
 )
 
 // Condition reasons
@@ -551,6 +552,10 @@ func (r *ZarfPackageReconciler) deploy(
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
 		ReasonDeploying, "Deployment in progress")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+		ReasonDeploying, "Deployment in progress")
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+		ReasonDeploying, "Waiting for deployment to complete")
 	if r.recorder != nil {
 		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonDeploying, "Starting package deployment")
 	}
@@ -634,6 +639,15 @@ func (r *ZarfPackageReconciler) deploy(
 		result, err = r.retryDeployAfterHelmRecovery(ctx, log, zarfPkg, zarfClient, opts, timeout, err)
 	}
 	if err != nil {
+		if status.Code(err) == codes.ResourceExhausted {
+			log.Info("sidecar busy with another operation, retrying deploy", "requeueAfter", sidecarBusyRequeue)
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
+				ReasonDeploying, "Waiting for sidecar deploy slot")
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+				ReasonDeploying, "Waiting for sidecar deploy slot")
+			return ctrl.Result{RequeueAfter: sidecarBusyRequeue}, nil
+		}
+
 		r.observeDeployDuration(deployStart, "failure")
 		log.Error(err, "deployment failed")
 		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
@@ -748,6 +762,11 @@ func (r *ZarfPackageReconciler) handleDeletion(
 			st := status.Convert(err)
 			if st.Code() == codes.NotFound {
 				log.Info("package already absent during deletion, proceeding with finalizer removal", "package", zarfPkg.Status.PackageName)
+			} else if st.Code() == codes.ResourceExhausted {
+				log.Info("sidecar busy with another operation, retrying removal", "requeueAfter", sidecarBusyRequeue)
+				r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+					ReasonRemoving, "Waiting for sidecar remove slot")
+				return ctrl.Result{RequeueAfter: sidecarBusyRequeue}, nil
 			} else {
 				log.Error(err, "failed to remove package")
 				r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,

@@ -417,6 +417,27 @@ var _ = Describe("ZarfPackage Controller", func() {
 			expectEventReason(recorder, ReasonDeployFailed)
 		})
 
+		It("should requeue quickly without failure when sidecar is busy", func() {
+			nn := createResource("deploy-sidecar-busy-pkg", true, "oci://example.com/pkg:v1")
+
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeploy(nil, status.Error(codes.ResourceExhausted, "another deploy operation is in progress"))
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(sidecarBusyRequeue))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeploying))
+			Expect(updated.Status.FailureCount).To(Equal(int32(0)))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(ReasonDeploying))
+		})
+
 		It("should keep scheduled requeue when status update fails after reconcile result is set", func() {
 			nn := createResource("status-update-fail-with-result-pkg", true, "oci://example.com/pkg:v1")
 

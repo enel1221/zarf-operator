@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1422,6 +1423,312 @@ spec:
 				g.Expect(output).To(Equal("2"))
 			}
 			Eventually(verifyReplicas, 3*time.Minute).Should(Succeed())
+		})
+	})
+
+	Context("Package Update Scenarios", func() {
+		const (
+			updateNamespace   = "default"
+			nginxTargetNs     = "e2e-test-nginx"
+			httpbinTargetNs   = "e2e-test-httpbin"
+			parentPkgName     = "e2e-parent-update"
+			childPkgName      = "e2e-child"
+			sourceUpdatePkg   = "e2e-update-nginx"
+			dependencyPkgName = "e2e-update-dependency"
+			dependentPkgName  = "e2e-update-dependent"
+			independentA      = "e2e-update-independent-a"
+			independentB      = "e2e-update-independent-b"
+		)
+
+		applyYAML := func(yaml string) {
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(yaml)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		waitForPhase := func(name, phase string, timeout time.Duration) {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", name,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(phase))
+			}, timeout, 2*time.Second).Should(Succeed())
+		}
+
+		AfterEach(func() {
+			for _, name := range []string{
+				sourceUpdatePkg,
+				parentPkgName,
+				childPkgName,
+				dependencyPkgName,
+				dependentPkgName,
+				independentA,
+				independentB,
+			} {
+				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
+					"-n", updateNamespace, "--ignore-not-found=true", "--timeout=120s")
+				_, _ = utils.Run(cmd)
+			}
+
+			for _, ns := range []string{nginxTargetNs, httpbinTargetNs} {
+				cmd := exec.Command("kubectl", "delete", "ns", ns,
+					"--ignore-not-found=true", "--timeout=60s")
+				_, _ = utils.Run(cmd)
+			}
+		})
+
+		It("should redeploy on source version update and refresh status conditions", func() {
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, sourceUpdatePkg, updateNamespace, registryURL))
+
+			waitForPhase(sourceUpdatePkg, "Deployed", 5*time.Minute)
+
+			cmd := exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.deployedSpecHash}")
+			initialHash, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(initialHash).NotTo(BeEmpty())
+
+			cmd = exec.Command("kubectl", "patch", "zarfpackage", sourceUpdatePkg,
+				"-n", updateNamespace,
+				"--type=merge",
+				"-p", fmt.Sprintf(`{"spec":{"source":"oci://%s/e2e-test-nginx:0.0.2"}}`, registryURL))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(SatisfyAny(Equal("Deploying"), Equal("Deployed")))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			waitForPhase(sourceUpdatePkg, "Deployed", 5*time.Minute)
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.deployedVersion}")
+			version, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(version).To(Equal("0.0.2"))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.deployedSpecHash}")
+			hash, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hash).NotTo(Equal(initialHash))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.source}")
+			statusSource, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusSource).To(Equal(fmt.Sprintf("oci://%s/e2e-test-nginx:0.0.2", registryURL)))
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "nginx-test",
+					"-n", nginxTargetNs,
+					"-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.metadata.generation}:{.status.observedGeneration}")
+			generations, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			parts := strings.Split(generations, ":")
+			Expect(parts).To(HaveLen(2))
+			Expect(parts[1]).To(Equal(parts[0]))
+		})
+
+		It("should handle parent package updates that redeploy a child zarfpackage", func() {
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-parent:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  set:
+    - "CHILD_VERSION=0.0.1"
+`, parentPkgName, updateNamespace, registryURL))
+
+			waitForPhase(parentPkgName, "Deployed", 5*time.Minute)
+			waitForPhase(childPkgName, "Deployed", 5*time.Minute)
+
+			cmd := exec.Command("kubectl", "get", "zarfpackage", childPkgName,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.deployedVersion}")
+			childVersion, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(childVersion).To(Equal("0.0.1"))
+
+			cmd = exec.Command("kubectl", "patch", "zarfpackage", parentPkgName,
+				"-n", updateNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"set":["CHILD_VERSION=0.0.2"]}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", parentPkgName,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(SatisfyAny(Equal("Deploying"), Equal("Deployed")))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			waitForPhase(parentPkgName, "Deployed", 5*time.Minute)
+			waitForPhase(childPkgName, "Deployed", 5*time.Minute)
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", childPkgName,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.deployedVersion}")
+			childVersion, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(childVersion).To(Equal("0.0.2"))
+
+			for _, name := range []string{parentPkgName, childPkgName} {
+				cmd = exec.Command("kubectl", "get", "zarfpackage", name,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				ready, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ready).To(Equal("True"))
+			}
+		})
+
+		It("should keep dependent package healthy through dependency source updates", func() {
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, dependencyPkgName, updateNamespace, registryURL))
+
+			waitForPhase(dependencyPkgName, "Deployed", 5*time.Minute)
+
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  dependsOn:
+    - name: %s
+`, dependentPkgName, updateNamespace, registryURL, dependencyPkgName))
+
+			waitForPhase(dependentPkgName, "Deployed", 5*time.Minute)
+
+			cmd := exec.Command("kubectl", "patch", "zarfpackage", dependencyPkgName,
+				"-n", updateNamespace,
+				"--type=merge",
+				"-p", fmt.Sprintf(`{"spec":{"source":"oci://%s/e2e-test-nginx:0.0.2"}}`, registryURL))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			waitForPhase(dependencyPkgName, "Deployed", 5*time.Minute)
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentPkgName,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Deployed"))
+
+				cmd = exec.Command("kubectl", "get", "zarfpackage", dependentPkgName,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='DependenciesMet')].status}")
+				depsReady, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(depsReady).To(Equal("True"))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("should process independent package updates without dependsOn", func() {
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-nginx:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, independentA, updateNamespace, registryURL))
+
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "oci://%s/e2e-test-httpbin:0.0.1"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+`, independentB, updateNamespace, registryURL))
+
+			waitForPhase(independentA, "Deployed", 5*time.Minute)
+			waitForPhase(independentB, "Deployed", 5*time.Minute)
+
+			cmd := exec.Command("kubectl", "patch", "zarfpackage", independentA,
+				"-n", updateNamespace,
+				"--type=merge",
+				"-p", fmt.Sprintf(`{"spec":{"source":"oci://%s/e2e-test-nginx:0.0.2"}}`, registryURL))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "patch", "zarfpackage", independentB,
+				"-n", updateNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"set":["REPLICAS=2"]}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			waitForPhase(independentA, "Deployed", 5*time.Minute)
+			waitForPhase(independentB, "Deployed", 5*time.Minute)
+
+			cmd = exec.Command("kubectl", "get", "deployment", "httpbin",
+				"-n", httpbinTargetNs,
+				"-o", "jsonpath={.spec.replicas}")
+			replicas, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(replicas).To(Equal("2"))
 		})
 	})
 

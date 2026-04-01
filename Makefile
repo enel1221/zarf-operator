@@ -102,8 +102,10 @@ CRD_CHART_TEMPLATE ?= dist/chart/templates/crd/zarf.dev_zarfpackages.yaml
 
 # All test package directories
 E2E_PKG_DIRS := test/e2e/testdata/packages/nginx \
+	test/e2e/testdata/packages/nginx-v2 \
 	test/e2e/testdata/packages/multi-component \
-	test/e2e/testdata/packages/httpbin
+	test/e2e/testdata/packages/httpbin \
+	test/e2e/testdata/packages/parent
 
 .PHONY: e2e-setup
 e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.

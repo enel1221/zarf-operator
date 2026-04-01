@@ -1,0 +1,19 @@
+kind: ZarfPackageConfig
+metadata:
+  name: e2e-test-parent
+  description: Parent package that deploys a child ZarfPackage for e2e update testing
+  version: 0.0.1
+  yolo: true
+
+variables:
+  - name: CHILD_VERSION
+    default: "0.0.1"
+    description: Version of the child e2e-test-nginx package
+
+components:
+  - name: child-zarfpackage
+    required: true
+    manifests:
+      - name: child-zarfpackage-manifest
+        files:
+          - child-zarfpackage.yaml

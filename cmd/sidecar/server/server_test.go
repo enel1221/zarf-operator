@@ -73,28 +73,16 @@ func (e assertErr) Error() string {
 	return string(e)
 }
 
-func TestDeployReturnsDeadlineExceededWhenWaitingForLock(t *testing.T) {
+func TestDeployReturnsResourceExhaustedWhenLockHeld(t *testing.T) {
 	s := NewZarfServer(nil, logger.Config{}, "test")
 	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
 
-	errCh := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer cancel()
-		_, err := s.Deploy(ctx, &zarfv1.DeployRequest{Source: "oci://example.com/pkg:v1"})
-		errCh <- err
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	s.deployMu.Unlock()
-
-	select {
-	case err := <-errCh:
-		if status.Code(err) != codes.DeadlineExceeded {
-			t.Fatalf("expected DeadlineExceeded, got %v (%v)", status.Code(err), err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Deploy to return")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := s.Deploy(ctx, &zarfv1.DeployRequest{Source: "oci://example.com/pkg:v1"})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected ResourceExhausted, got %v (%v)", status.Code(err), err)
 	}
 }
 
@@ -190,27 +178,15 @@ func TestCapturingHandlerKeepsLastNLines(t *testing.T) {
 	}
 }
 
-func TestRemoveReturnsDeadlineExceededWhenWaitingForLock(t *testing.T) {
+func TestRemoveReturnsResourceExhaustedWhenLockHeld(t *testing.T) {
 	s := NewZarfServer(nil, logger.Config{}, "test")
 	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
 
-	errCh := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer cancel()
-		_, err := s.Remove(ctx, &zarfv1.RemoveRequest{PackageName: "pkg"})
-		errCh <- err
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	s.deployMu.Unlock()
-
-	select {
-	case err := <-errCh:
-		if status.Code(err) != codes.DeadlineExceeded {
-			t.Fatalf("expected DeadlineExceeded, got %v (%v)", status.Code(err), err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Remove to return")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := s.Remove(ctx, &zarfv1.RemoveRequest{PackageName: "pkg"})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected ResourceExhausted, got %v (%v)", status.Code(err), err)
 	}
 }

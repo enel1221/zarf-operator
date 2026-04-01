@@ -1,0 +1,10 @@
+apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: e2e-child
+  namespace: default
+spec:
+  source: oci://registry.e2e-registry.svc.cluster.local:5000/e2e-test-nginx:###ZARF_VAR_CHILD_VERSION###
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true

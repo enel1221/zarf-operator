@@ -112,7 +112,9 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	}
 
 	log.Debug("waiting for deploy lock")
-	s.deployMu.Lock()
+	if !s.deployMu.TryLock() {
+		return nil, status.Error(codes.ResourceExhausted, "another deploy or remove operation is in progress")
+	}
 	defer s.deployMu.Unlock()
 	log.Debug("acquired deploy lock")
 	if err := ctx.Err(); err != nil {
@@ -379,7 +381,9 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 	}
 
 	log.Debug("waiting for remove lock")
-	s.deployMu.Lock()
+	if !s.deployMu.TryLock() {
+		return nil, status.Error(codes.ResourceExhausted, "another deploy or remove operation is in progress")
+	}
 	defer s.deployMu.Unlock()
 	log.Debug("acquired remove lock")
 	if err := ctx.Err(); err != nil {

@@ -1,0 +1,24 @@
+kind: ZarfPackageConfig
+metadata:
+  name: e2e-test-nginx
+  description: Minimal nginx package v0.0.2 for e2e update testing
+  version: 0.0.2
+  yolo: true
+
+components:
+  - name: nginx
+    required: true
+    charts:
+      - name: nginx-test
+        namespace: e2e-test-nginx
+        version: 0.0.2
+        localPath: chart
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: deployment
+                name: nginx-test
+                namespace: e2e-test-nginx
+                condition: available
