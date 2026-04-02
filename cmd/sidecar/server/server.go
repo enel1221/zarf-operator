@@ -381,14 +381,15 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 	}
 
 	log.Debug("waiting for remove lock")
-	if !s.deployMu.TryLock() {
-		return nil, status.Error(codes.ResourceExhausted, "another deploy or remove operation is in progress")
+	for !s.deployMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, status.Errorf(codes.DeadlineExceeded, "request canceled while waiting for remove lock: %v", ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 	defer s.deployMu.Unlock()
 	log.Debug("acquired remove lock")
-	if err := ctx.Err(); err != nil {
-		return nil, status.Errorf(codes.DeadlineExceeded, "request canceled while waiting for remove lock: %v", err)
-	}
 
 	// Connect to cluster
 	c, err := cluster.New(ctx)

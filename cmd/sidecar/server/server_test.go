@@ -178,7 +178,7 @@ func TestCapturingHandlerKeepsLastNLines(t *testing.T) {
 	}
 }
 
-func TestRemoveReturnsResourceExhaustedWhenLockHeld(t *testing.T) {
+func TestRemoveWaitsForLockThenTimesOut(t *testing.T) {
 	s := NewZarfServer(nil, logger.Config{}, "test")
 	s.deployMu.Lock()
 	defer s.deployMu.Unlock()
@@ -186,7 +186,7 @@ func TestRemoveReturnsResourceExhaustedWhenLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err := s.Remove(ctx, &zarfv1.RemoveRequest{PackageName: "pkg"})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("expected ResourceExhausted, got %v (%v)", status.Code(err), err)
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("expected DeadlineExceeded, got %v (%v)", status.Code(err), err)
 	}
 }
