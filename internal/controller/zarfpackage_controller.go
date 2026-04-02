@@ -593,38 +593,8 @@ func (r *ZarfPackageReconciler) deploy(
 		HelmDebugEnabled:        zarfPkg.Spec.HelmDebugEnabled,
 	}
 
-	// Resolve registry credentials from referenced Secret
-	if ref := zarfPkg.Spec.RegistryCredentialSecretRef; ref != "" {
-		var secret corev1.Secret
-		if err := r.Get(ctx, client.ObjectKey{Namespace: zarfPkg.Namespace, Name: ref}, &secret); err != nil {
-			log.Error(err, "failed to get registry credential secret", "secret", ref)
-			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
-			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-				ReasonSecretNotFound, fmt.Sprintf("Registry credential secret %q not found: %v", ref, err))
-			if r.recorder != nil {
-				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
-					fmt.Sprintf("Secret %q not found", ref))
-			}
-			r.recordFailure(zarfPkg)
-			r.recordFailureMetric(ReasonSecretNotFound)
-			return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
-		}
-		dockerCfg, ok := secret.Data[".dockerconfigjson"]
-		if !ok {
-			log.Error(nil, "registry credential secret missing .dockerconfigjson key", "secret", ref)
-			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
-			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-				ReasonSecretNotFound, fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
-			if r.recorder != nil {
-				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
-					fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
-			}
-			r.recordFailure(zarfPkg)
-			r.recordFailureMetric(ReasonSecretNotFound)
-			return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
-		}
-		opts.RegistryCredentialJSON = dockerCfg
-		log.Info("resolved registry credentials from secret", "secret", ref)
+	if retry := r.resolveRegistryCredentials(ctx, log, zarfPkg, &opts); retry != nil {
+		return *retry, nil
 	}
 
 	if wasFailed {
@@ -718,6 +688,54 @@ func (r *ZarfPackageReconciler) deploy(
 	}
 
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+}
+
+func (r *ZarfPackageReconciler) resolveRegistryCredentials(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	opts *zarf.DeployOptions,
+) *ctrl.Result {
+	ref := zarfPkg.Spec.RegistryCredentialSecretRef
+	if ref == "" {
+		return nil
+	}
+
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: zarfPkg.Namespace, Name: ref}, &secret); err != nil {
+		log.Error(err, "failed to get registry credential secret", "secret", ref)
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+			ReasonSecretNotFound, fmt.Sprintf("Registry credential secret %q not found: %v", ref, err))
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
+				fmt.Sprintf("Secret %q not found", ref))
+		}
+		r.recordFailure(zarfPkg)
+		r.recordFailureMetric(ReasonSecretNotFound)
+		result := ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}
+		return &result
+	}
+
+	dockerCfg, ok := secret.Data[".dockerconfigjson"]
+	if !ok {
+		log.Error(nil, "registry credential secret missing .dockerconfigjson key", "secret", ref)
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+			ReasonSecretNotFound, fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
+		if r.recorder != nil {
+			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
+				fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
+		}
+		r.recordFailure(zarfPkg)
+		r.recordFailureMetric(ReasonSecretNotFound)
+		result := ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}
+		return &result
+	}
+
+	opts.RegistryCredentialJSON = dockerCfg
+	log.Info("resolved registry credentials from secret", "secret", ref)
+	return nil
 }
 
 func (r *ZarfPackageReconciler) handleDeletion(

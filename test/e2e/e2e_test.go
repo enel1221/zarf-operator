@@ -1447,15 +1447,15 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		waitForPhase := func(name, phase string, timeout time.Duration) {
+		waitForDeployed := func(name string) {
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "zarfpackage", name,
 					"-n", updateNamespace,
 					"-o", "jsonpath={.status.phase}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal(phase))
-			}, timeout, 2*time.Second).Should(Succeed())
+				g.Expect(output).To(Equal("Deployed"))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
 		}
 
 		AfterEach(func() {
@@ -1493,7 +1493,7 @@ spec:
   skipSignatureValidation: true
 `, sourceUpdatePkg, updateNamespace, registryURL))
 
-			waitForPhase(sourceUpdatePkg, "Deployed", 5*time.Minute)
+			waitForDeployed(sourceUpdatePkg)
 
 			cmd := exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
 				"-n", updateNamespace,
@@ -1518,7 +1518,7 @@ spec:
 				g.Expect(phase).To(SatisfyAny(Equal("Deploying"), Equal("Deployed")))
 			}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
-			waitForPhase(sourceUpdatePkg, "Deployed", 5*time.Minute)
+			waitForDeployed(sourceUpdatePkg)
 
 			cmd = exec.Command("kubectl", "get", "zarfpackage", sourceUpdatePkg,
 				"-n", updateNamespace,
@@ -1575,8 +1575,8 @@ spec:
     - "CHILD_VERSION=0.0.1"
 `, parentPkgName, updateNamespace, registryURL))
 
-			waitForPhase(parentPkgName, "Deployed", 5*time.Minute)
-			waitForPhase(childPkgName, "Deployed", 5*time.Minute)
+			waitForDeployed(parentPkgName)
+			waitForDeployed(childPkgName)
 
 			cmd := exec.Command("kubectl", "get", "zarfpackage", childPkgName,
 				"-n", updateNamespace,
@@ -1601,8 +1601,8 @@ spec:
 				g.Expect(phase).To(SatisfyAny(Equal("Deploying"), Equal("Deployed")))
 			}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
-			waitForPhase(parentPkgName, "Deployed", 5*time.Minute)
-			waitForPhase(childPkgName, "Deployed", 5*time.Minute)
+			waitForDeployed(parentPkgName)
+			waitForDeployed(childPkgName)
 
 			cmd = exec.Command("kubectl", "get", "zarfpackage", childPkgName,
 				"-n", updateNamespace,
@@ -1634,7 +1634,7 @@ spec:
   skipSignatureValidation: true
 `, dependencyPkgName, updateNamespace, registryURL))
 
-			waitForPhase(dependencyPkgName, "Deployed", 5*time.Minute)
+			waitForDeployed(dependencyPkgName)
 
 			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
 kind: ZarfPackage
@@ -1650,7 +1650,7 @@ spec:
     - name: %s
 `, dependentPkgName, updateNamespace, registryURL, dependencyPkgName))
 
-			waitForPhase(dependentPkgName, "Deployed", 5*time.Minute)
+			waitForDeployed(dependentPkgName)
 
 			cmd := exec.Command("kubectl", "patch", "zarfpackage", dependencyPkgName,
 				"-n", updateNamespace,
@@ -1659,7 +1659,7 @@ spec:
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			waitForPhase(dependencyPkgName, "Deployed", 5*time.Minute)
+			waitForDeployed(dependencyPkgName)
 
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "zarfpackage", dependentPkgName,
@@ -1703,8 +1703,8 @@ spec:
   skipSignatureValidation: true
 `, independentB, updateNamespace, registryURL))
 
-			waitForPhase(independentA, "Deployed", 5*time.Minute)
-			waitForPhase(independentB, "Deployed", 5*time.Minute)
+			waitForDeployed(independentA)
+			waitForDeployed(independentB)
 
 			cmd := exec.Command("kubectl", "patch", "zarfpackage", independentA,
 				"-n", updateNamespace,
@@ -1720,8 +1720,8 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			waitForPhase(independentA, "Deployed", 5*time.Minute)
-			waitForPhase(independentB, "Deployed", 5*time.Minute)
+			waitForDeployed(independentA)
+			waitForDeployed(independentB)
 
 			cmd = exec.Command("kubectl", "get", "deployment", "httpbin",
 				"-n", httpbinTargetNs,
