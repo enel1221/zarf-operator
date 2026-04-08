@@ -73,10 +73,17 @@ func (e assertErr) Error() string {
 	return string(e)
 }
 
-func TestDeployReturnsResourceExhaustedWhenLockHeld(t *testing.T) {
+func TestDeployReturnsResourceExhaustedWhenRemoveActive(t *testing.T) {
 	s := NewZarfServer(nil, logger.Config{}, "test")
-	s.deployMu.Lock()
-	defer s.deployMu.Unlock()
+
+	// Simulate an active remove operation.
+	s.mu.Lock()
+	s.active = &activeOperation{
+		cancel: func() {},
+		done:   make(chan struct{}),
+		kind:   opRemove,
+	}
+	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -84,6 +91,16 @@ func TestDeployReturnsResourceExhaustedWhenLockHeld(t *testing.T) {
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("expected ResourceExhausted, got %v (%v)", status.Code(err), err)
 	}
+}
+
+func TestDeployCancelsPreviousDeploy(t *testing.T) {
+	s, cancelled := simulateActiveDeploy(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.Deploy(ctx, &zarfv1.DeployRequest{Source: "oci://example.com/pkg:v1"})
+
+	assertCancelled(t, cancelled, err)
 }
 
 func TestClassifyDeployError(t *testing.T) {
@@ -178,15 +195,79 @@ func TestCapturingHandlerKeepsLastNLines(t *testing.T) {
 	}
 }
 
-func TestRemoveWaitsForLockThenTimesOut(t *testing.T) {
+func TestRemoveReturnsResourceExhaustedWhenRemoveActive(t *testing.T) {
 	s := NewZarfServer(nil, logger.Config{}, "test")
-	s.deployMu.Lock()
-	defer s.deployMu.Unlock()
+
+	// Simulate an active remove operation.
+	s.mu.Lock()
+	s.active = &activeOperation{
+		cancel: func() {},
+		done:   make(chan struct{}),
+		kind:   opRemove,
+	}
+	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err := s.Remove(ctx, &zarfv1.RemoveRequest{PackageName: "pkg"})
-	if status.Code(err) != codes.DeadlineExceeded {
-		t.Fatalf("expected DeadlineExceeded, got %v (%v)", status.Code(err), err)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected ResourceExhausted, got %v (%v)", status.Code(err), err)
+	}
+}
+
+func TestRemoveCancelsPreviousDeploy(t *testing.T) {
+	s, cancelled := simulateActiveDeploy(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.Remove(ctx, &zarfv1.RemoveRequest{PackageName: "pkg"})
+
+	assertCancelled(t, cancelled, err)
+}
+
+// simulateActiveDeploy creates a ZarfServer with a fake in-progress deploy
+// that will clean up when cancelled. Returns the server and a channel that
+// closes when the cancel func is invoked.
+func simulateActiveDeploy(t *testing.T) (*ZarfServer, <-chan struct{}) {
+	t.Helper()
+	s := NewZarfServer(nil, logger.Config{}, "test")
+
+	cancelled := make(chan struct{})
+	done := make(chan struct{})
+
+	s.mu.Lock()
+	s.active = &activeOperation{
+		cancel: func() { close(cancelled) },
+		done:   done,
+		kind:   opDeploy,
+	}
+	s.mu.Unlock()
+
+	go func() {
+		<-cancelled
+		s.mu.Lock()
+		s.active = nil
+		s.mu.Unlock()
+		close(done)
+	}()
+
+	return s, cancelled
+}
+
+// assertCancelled verifies the previous operation was cancelled and the
+// returned error is not ResourceExhausted (meaning the caller got past
+// slot acquisition).
+func assertCancelled(t *testing.T, cancelled <-chan struct{}, err error) {
+	t.Helper()
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("previous deploy was not cancelled")
+	}
+	if status.Code(err) == codes.ResourceExhausted {
+		t.Fatalf(
+			"should not get ResourceExhausted after cancelling previous deploy: %v",
+			err,
+		)
 	}
 }

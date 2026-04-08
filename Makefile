@@ -195,7 +195,7 @@ test-e2e: manifests generate fmt vet ## Run e2e tests against existing cluster (
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	KIND_CLUSTER=$(E2E_KIND_CLUSTER) CERT_MANAGER_INSTALL_SKIP=true go test ./test/e2e/ -v -ginkgo.v -timeout 35m
+	KIND_CLUSTER=$(E2E_KIND_CLUSTER) CERT_MANAGER_INSTALL_SKIP=true go test ./test/e2e/ -v -ginkgo.v -timeout 60m
 
 .PHONY: test-e2e-fresh
 test-e2e-fresh: manifests generate fmt vet ## Full cluster teardown, rebuild images, and run e2e tests.

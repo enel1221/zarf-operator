@@ -617,6 +617,10 @@ func (r *ZarfPackageReconciler) deploy(
 				ReasonDeploying, "Waiting for sidecar deploy slot")
 			return ctrl.Result{RequeueAfter: sidecarBusyRequeue}, nil
 		}
+		if status.Code(err) == codes.Canceled {
+			log.Info("deploy cancelled by newer request, requeueing immediately")
+			return ctrl.Result{Requeue: true}, nil
+		}
 
 		r.observeDeployDuration(deployStart, "failure")
 		log.Error(err, "deployment failed")
@@ -785,6 +789,9 @@ func (r *ZarfPackageReconciler) handleDeletion(
 				r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
 					ReasonRemoving, "Waiting for sidecar remove slot")
 				return ctrl.Result{RequeueAfter: sidecarBusyRequeue}, nil
+			} else if st.Code() == codes.Canceled {
+				log.Info("remove cancelled, requeueing immediately")
+				return ctrl.Result{Requeue: true}, nil
 			} else {
 				log.Error(err, "failed to remove package")
 				r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,

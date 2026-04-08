@@ -15,5 +15,6 @@ components:
     required: true
     manifests:
       - name: child-zarfpackage-manifest
+        noWait: true
         files:
           - child-zarfpackage.yaml

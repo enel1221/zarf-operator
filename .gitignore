@@ -30,3 +30,4 @@ go.work
 *.tar.zst
 main
 .env
+.flux

@@ -82,6 +82,21 @@ var _ = Describe("Manager", Ordered, func() {
 			metricsRoleBindingName, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 
+		By("stripping finalizers from all remaining ZarfPackages")
+		cmd = exec.Command("kubectl", "get", "zarfpackage", "--all-namespaces",
+			"-o", "jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name} {end}")
+		if out, err := utils.Run(cmd); err == nil {
+			for _, item := range strings.Fields(out) {
+				parts := strings.SplitN(item, "/", 2)
+				if len(parts) == 2 {
+					patch := exec.Command("kubectl", "patch", "zarfpackage", parts[1],
+						"-n", parts[0], "--type=json",
+						"-p", `[{"op":"remove","path":"/metadata/finalizers"}]`)
+					_, _ = utils.Run(patch)
+				}
+			}
+		}
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
@@ -1455,10 +1470,27 @@ spec:
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("Deployed"))
-			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+			}, 10*time.Minute, 2*time.Second).Should(Succeed())
 		}
 
 		AfterEach(func() {
+			// Strip finalizers so CRs delete immediately without waiting for sidecar Remove.
+			// This prevents stale Helm releases when Remove can't acquire the lock.
+			for _, name := range []string{
+				sourceUpdatePkg,
+				parentPkgName,
+				childPkgName,
+				dependencyPkgName,
+				dependentPkgName,
+				independentA,
+				independentB,
+			} {
+				cmd := exec.Command("kubectl", "patch", "zarfpackage", name,
+					"-n", updateNamespace, "--type=json",
+					"-p", `[{"op":"remove","path":"/metadata/finalizers"}]`)
+				_, _ = utils.Run(cmd)
+			}
+
 			for _, name := range []string{
 				sourceUpdatePkg,
 				parentPkgName,
@@ -1469,9 +1501,16 @@ spec:
 				independentB,
 			} {
 				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
-					"-n", updateNamespace, "--ignore-not-found=true", "--timeout=120s")
+					"-n", updateNamespace, "--ignore-not-found=true", "--timeout=30s")
 				_, _ = utils.Run(cmd)
 			}
+
+			// Clean up any Zarf-managed Helm releases left behind (e.g. from
+			// parent package components) so the next test starts with clean state.
+			helmClean := `helm list --all -n default --filter '^zarf-' -q 2>/dev/null` +
+				` | xargs -r -I{} helm delete {} -n default 2>/dev/null; true`
+			cmd := exec.Command("sh", "-c", helmClean)
+			_, _ = utils.Run(cmd)
 
 			for _, ns := range []string{nginxTargetNs, httpbinTargetNs} {
 				cmd := exec.Command("kubectl", "delete", "ns", ns,

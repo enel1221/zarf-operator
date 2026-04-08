@@ -28,13 +28,29 @@ import (
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
 )
 
+type opKind string
+
+const (
+	opDeploy opKind = "deploy"
+	opRemove opKind = "remove"
+)
+
+type activeOperation struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	kind   opKind
+}
+
+const cancelWaitTimeout = 5 * time.Second
+
 type ZarfServer struct {
 	zarfv1.UnimplementedZarfServiceServer
 	baseLogger *slog.Logger
 	baseConfig logger.Config
 	version    string
 	cachePath  string
-	deployMu   sync.Mutex
+	mu         sync.Mutex
+	active     *activeOperation
 }
 
 func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version string) *ZarfServer {
@@ -53,6 +69,55 @@ func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version st
 		version:    version,
 		cachePath:  cachePath,
 	}
+}
+
+func (s *ZarfServer) acquireOp(ctx context.Context, kind opKind) (context.Context, func(), error) {
+	s.mu.Lock()
+
+	if s.active != nil {
+		current := s.active
+		if current.kind == opRemove {
+			s.mu.Unlock()
+			return nil, nil, status.Error(codes.ResourceExhausted, "a remove operation is in progress")
+		}
+		current.cancel()
+		s.mu.Unlock()
+
+		select {
+		case <-current.done:
+		case <-time.After(cancelWaitTimeout):
+			return nil, nil, status.Error(codes.ResourceExhausted,
+				"timed out waiting for previous operation to cancel")
+		case <-ctx.Done():
+			return nil, nil, status.FromContextError(ctx.Err()).Err()
+		}
+
+		s.mu.Lock()
+		if s.active != nil {
+			s.mu.Unlock()
+			return nil, nil, status.Error(codes.ResourceExhausted,
+				"another operation started while cancelling previous")
+		}
+	}
+
+	opCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.active = &activeOperation{
+		cancel: cancel,
+		done:   done,
+		kind:   kind,
+	}
+	s.mu.Unlock()
+
+	cleanup := func() {
+		cancel()
+		s.mu.Lock()
+		s.active = nil
+		s.mu.Unlock()
+		close(done)
+	}
+
+	return opCtx, cleanup, nil
 }
 
 func (s *ZarfServer) loggerForRequest(ctx context.Context, req *zarfv1.DeployRequest) (*slog.Logger, context.Context) {
@@ -111,15 +176,13 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		return nil, status.Error(codes.InvalidArgument, "source is required")
 	}
 
-	log.Debug("waiting for deploy lock")
-	if !s.deployMu.TryLock() {
-		return nil, status.Error(codes.ResourceExhausted, "another deploy or remove operation is in progress")
+	log.Debug("acquiring deploy slot")
+	ctx, cleanup, err := s.acquireOp(ctx, opDeploy)
+	if err != nil {
+		return nil, err
 	}
-	defer s.deployMu.Unlock()
-	log.Debug("acquired deploy lock")
-	if err := ctx.Err(); err != nil {
-		return nil, status.Errorf(codes.DeadlineExceeded, "request canceled while waiting for deploy lock: %v", err)
-	}
+	defer cleanup()
+	log.Debug("acquired deploy slot")
 
 	// Apply Zarf defaults for headless operation
 	if req.Retries == 0 {
@@ -217,6 +280,9 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 
 	pkgLayout, err := packager.LoadPackage(ctx, req.Source, loadOpts)
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil, status.Error(codes.Canceled, "operation cancelled")
+		}
 		log.Error("failed to load package", "error", err, "source", req.Source)
 		return nil, status.Errorf(classifyOCIError(err), "failed to load package: %v", err)
 	}
@@ -265,6 +331,9 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 
 	result, err := packager.Deploy(ctx, pkgLayout, deployOpts)
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil, status.Error(codes.Canceled, "deploy cancelled")
+		}
 		log.Error("deployment failed", "error", err, "package", pkgLayout.Pkg.Metadata.Name)
 		failedComponent, failedChart := parseDeployError(err.Error())
 		detail := &zarfv1.DeployErrorDetail{
@@ -380,16 +449,13 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 		return nil, status.Error(codes.InvalidArgument, "package_name is required")
 	}
 
-	log.Debug("waiting for remove lock")
-	for !s.deployMu.TryLock() {
-		select {
-		case <-ctx.Done():
-			return nil, status.Errorf(codes.DeadlineExceeded, "request canceled while waiting for remove lock: %v", ctx.Err())
-		case <-time.After(500 * time.Millisecond):
-		}
+	log.Debug("acquiring remove slot")
+	ctx, cleanup, err := s.acquireOp(ctx, opRemove)
+	if err != nil {
+		return nil, err
 	}
-	defer s.deployMu.Unlock()
-	log.Debug("acquired remove lock")
+	defer cleanup()
+	log.Debug("acquired remove slot")
 
 	// Connect to cluster
 	c, err := cluster.New(ctx)
@@ -424,6 +490,9 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 
 	// Perform removal
 	if err := packager.Remove(ctx, deployedPkg.Data, removeOpts); err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil, status.Error(codes.Canceled, "remove cancelled")
+		}
 		log.Error("removal failed", "error", err, "package", req.PackageName)
 		return nil, status.Errorf(codes.Internal, "removal failed: %v", err)
 	}
