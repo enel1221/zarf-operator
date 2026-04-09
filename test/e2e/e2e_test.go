@@ -176,6 +176,22 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(Equal("Running"))
 			}
 			Eventually(verifyControllerUp).Should(Succeed())
+
+			By("validating that all containers are ready")
+			verifyAllContainersReady := func(g Gomega) {
+				// Collect container ready statuses as "true true ..." for each container
+				cmd := exec.Command("kubectl", "get", "pods", controllerPodName,
+					"-o", "jsonpath={.status.containerStatuses[*].ready}", "-n", namespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				statuses := strings.Fields(output)
+				g.Expect(statuses).NotTo(BeEmpty(), "expected at least one container status")
+				for i, s := range statuses {
+					g.Expect(s).To(Equal("true"),
+						"container %d is not ready (readiness probe may be failing)", i)
+				}
+			}
+			Eventually(verifyAllContainersReady).Should(Succeed())
 		})
 
 		It("should run manager with configured concurrent reconcile workers", func() {

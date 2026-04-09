@@ -343,6 +343,12 @@ func newSidecarConnectionMonitor(
 	}
 }
 
+// NeedLeaderElection returns false so the monitor starts immediately,
+// allowing the sidecar connection to be established during leader election.
+func (m *sidecarConnectionMonitor) NeedLeaderElection() bool {
+	return false
+}
+
 func (m *sidecarConnectionMonitor) Start(ctx context.Context) error {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
