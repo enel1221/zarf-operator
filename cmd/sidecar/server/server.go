@@ -71,6 +71,59 @@ func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version st
 	}
 }
 
+// kubeconfigMu serializes process-wide KUBECONFIG env-var manipulation across
+// the Deploy / Remove / GetDeployedPackage handlers. It is held for the full
+// lifetime of each RPC body that touches the cluster (not just the
+// set/unset), so a concurrent RPC with no kubeconfig cannot observe another
+// RPC's temporary KUBECONFIG override.
+var kubeconfigMu sync.Mutex
+
+// applyKubeconfig serializes cluster access and (when kubeconfig is non-empty)
+// writes the bytes to a temp file and points KUBECONFIG at it for the life of
+// the returned cleanup. Callers MUST defer cleanup to release the mutex and
+// restore the environment.
+func applyKubeconfig(log *slog.Logger, kubeconfig []byte) (func(), error) {
+	kubeconfigMu.Lock()
+
+	if len(kubeconfig) == 0 {
+		return func() { kubeconfigMu.Unlock() }, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "zarf-kubeconfig-*")
+	if err != nil {
+		kubeconfigMu.Unlock()
+		return nil, fmt.Errorf("failed to create kubeconfig temp dir: %w", err)
+	}
+
+	path := filepath.Join(tmpDir, "config")
+	if err := os.WriteFile(path, kubeconfig, 0600); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		kubeconfigMu.Unlock()
+		return nil, fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+
+	origKubeconfig, hadEnv := os.LookupEnv("KUBECONFIG")
+	if err := os.Setenv("KUBECONFIG", path); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		kubeconfigMu.Unlock()
+		return nil, fmt.Errorf("failed to set KUBECONFIG: %w", err)
+	}
+	log.Info("applied remote cluster kubeconfig", "path", path)
+
+	cleanup := func() {
+		if hadEnv {
+			_ = os.Setenv("KUBECONFIG", origKubeconfig)
+		} else {
+			_ = os.Unsetenv("KUBECONFIG")
+		}
+		if rmErr := os.RemoveAll(tmpDir); rmErr != nil {
+			log.Warn("failed to remove kubeconfig temp dir", "error", rmErr, "path", tmpDir)
+		}
+		kubeconfigMu.Unlock()
+	}
+	return cleanup, nil
+}
+
 func (s *ZarfServer) acquireOp(ctx context.Context, kind opKind) (context.Context, func(), error) {
 	s.mu.Lock()
 
@@ -183,6 +236,12 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	}
 	defer cleanup()
 	log.Debug("acquired deploy slot")
+
+	kubeconfigCleanup, err := applyKubeconfig(log, req.Kubeconfig)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to apply kubeconfig: %v", err)
+	}
+	defer kubeconfigCleanup()
 
 	// Apply Zarf defaults for headless operation
 	if req.Retries == 0 {
@@ -392,6 +451,12 @@ func (s *ZarfServer) GetDeployedPackage(
 	log, ctx := s.baseLoggerWithContext(ctx)
 	log.Debug("get deployed package", "package", req.PackageName)
 
+	kubeconfigCleanup, err := applyKubeconfig(log, req.Kubeconfig)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to apply kubeconfig: %v", err)
+	}
+	defer kubeconfigCleanup()
+
 	c, err := cluster.New(ctx)
 	if err != nil {
 		log.Error("failed to connect to cluster", "error", err)
@@ -456,6 +521,12 @@ func (s *ZarfServer) Remove(ctx context.Context, req *zarfv1.RemoveRequest) (*za
 	}
 	defer cleanup()
 	log.Debug("acquired remove slot")
+
+	kubeconfigCleanup, err := applyKubeconfig(log, req.Kubeconfig)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to apply kubeconfig: %v", err)
+	}
+	defer kubeconfigCleanup()
 
 	// Connect to cluster
 	c, err := cluster.New(ctx)

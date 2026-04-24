@@ -48,6 +48,7 @@ message DeployRequest {
     bool yolo_mode = 19;
     bytes registry_credential_json = 20;
     bool helm_debug_enabled = 21;
+    bytes kubeconfig = 22;
 }
 
 message DeployResponse {
@@ -85,6 +86,7 @@ message RemoveRequest {
     google.protobuf.Duration timeout = 3;
     string namespace_override = 4;
     bool skip_version_check = 5;
+    bytes kubeconfig = 6;
 }
 
 message RemoveResponse {
@@ -93,6 +95,7 @@ message RemoveResponse {
 
 message GetDeployedPackageRequest {
     string package_name = 1;
+    bytes kubeconfig = 2;
 }
 
 message GetDeployedPackageResponse {

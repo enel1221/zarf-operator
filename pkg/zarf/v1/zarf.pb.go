@@ -45,6 +45,7 @@ type DeployRequest struct {
 	YoloMode                bool                   `protobuf:"varint,19,opt,name=yolo_mode,json=yoloMode,proto3" json:"yolo_mode,omitempty"`
 	RegistryCredentialJson  []byte                 `protobuf:"bytes,20,opt,name=registry_credential_json,json=registryCredentialJson,proto3" json:"registry_credential_json,omitempty"`
 	HelmDebugEnabled        bool                   `protobuf:"varint,21,opt,name=helm_debug_enabled,json=helmDebugEnabled,proto3" json:"helm_debug_enabled,omitempty"`
+	Kubeconfig              []byte                 `protobuf:"bytes,22,opt,name=kubeconfig,proto3" json:"kubeconfig,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -224,6 +225,13 @@ func (x *DeployRequest) GetHelmDebugEnabled() bool {
 		return x.HelmDebugEnabled
 	}
 	return false
+}
+
+func (x *DeployRequest) GetKubeconfig() []byte {
+	if x != nil {
+		return x.Kubeconfig
+	}
+	return nil
 }
 
 type DeployResponse struct {
@@ -505,6 +513,7 @@ type RemoveRequest struct {
 	Timeout           *durationpb.Duration   `protobuf:"bytes,3,opt,name=timeout,proto3" json:"timeout,omitempty"`
 	NamespaceOverride string                 `protobuf:"bytes,4,opt,name=namespace_override,json=namespaceOverride,proto3" json:"namespace_override,omitempty"`
 	SkipVersionCheck  bool                   `protobuf:"varint,5,opt,name=skip_version_check,json=skipVersionCheck,proto3" json:"skip_version_check,omitempty"`
+	Kubeconfig        []byte                 `protobuf:"bytes,6,opt,name=kubeconfig,proto3" json:"kubeconfig,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -574,6 +583,13 @@ func (x *RemoveRequest) GetSkipVersionCheck() bool {
 	return false
 }
 
+func (x *RemoveRequest) GetKubeconfig() []byte {
+	if x != nil {
+		return x.Kubeconfig
+	}
+	return nil
+}
+
 type RemoveResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -613,6 +629,7 @@ func (*RemoveResponse) Descriptor() ([]byte, []int) {
 type GetDeployedPackageRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PackageName   string                 `protobuf:"bytes,1,opt,name=package_name,json=packageName,proto3" json:"package_name,omitempty"`
+	Kubeconfig    []byte                 `protobuf:"bytes,2,opt,name=kubeconfig,proto3" json:"kubeconfig,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -652,6 +669,13 @@ func (x *GetDeployedPackageRequest) GetPackageName() string {
 		return x.PackageName
 	}
 	return ""
+}
+
+func (x *GetDeployedPackageRequest) GetKubeconfig() []byte {
+	if x != nil {
+		return x.Kubeconfig
+	}
+	return nil
 }
 
 type GetDeployedPackageResponse struct {
@@ -1126,7 +1150,7 @@ var File_zarf_v1_zarf_proto protoreflect.FileDescriptor
 
 const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\n" +
-	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xba\a\n" +
+	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xda\a\n" +
 	"\rDeployRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1e\n" +
 	"\n" +
@@ -1153,7 +1177,10 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\x12skip_version_check\x18\x12 \x01(\bR\x10skipVersionCheck\x12\x1b\n" +
 	"\tyolo_mode\x18\x13 \x01(\bR\byoloMode\x128\n" +
 	"\x18registry_credential_json\x18\x14 \x01(\fR\x16registryCredentialJson\x12,\n" +
-	"\x12helm_debug_enabled\x18\x15 \x01(\bR\x10helmDebugEnabled\x1a?\n" +
+	"\x12helm_debug_enabled\x18\x15 \x01(\bR\x10helmDebugEnabled\x12\x1e\n" +
+	"\n" +
+	"kubeconfig\x18\x16 \x01(\fR\n" +
+	"kubeconfig\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe1\x01\n" +
@@ -1181,7 +1208,7 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x1d\n" +
 	"\n" +
 	"chart_name\x18\x02 \x01(\tR\tchartName\x12\x16\n" +
-	"\x06status\x18\x03 \x01(\tR\x06status\"\xe4\x01\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\"\x84\x02\n" +
 	"\rRemoveRequest\x12!\n" +
 	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\x12\x1e\n" +
 	"\n" +
@@ -1189,10 +1216,16 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"components\x123\n" +
 	"\atimeout\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12-\n" +
 	"\x12namespace_override\x18\x04 \x01(\tR\x11namespaceOverride\x12,\n" +
-	"\x12skip_version_check\x18\x05 \x01(\bR\x10skipVersionCheck\"\x16\n" +
-	"\x0eRemoveResponseJ\x04\b\x01\x10\x02\">\n" +
+	"\x12skip_version_check\x18\x05 \x01(\bR\x10skipVersionCheck\x12\x1e\n" +
+	"\n" +
+	"kubeconfig\x18\x06 \x01(\fR\n" +
+	"kubeconfig\"\x16\n" +
+	"\x0eRemoveResponseJ\x04\b\x01\x10\x02\"^\n" +
 	"\x19GetDeployedPackageRequest\x12!\n" +
-	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\"R\n" +
+	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\x12\x1e\n" +
+	"\n" +
+	"kubeconfig\x18\x02 \x01(\fR\n" +
+	"kubeconfig\"R\n" +
 	"\x1aGetDeployedPackageResponse\x12.\n" +
 	"\apackage\x18\x01 \x01(\v2\x14.zarf.v1.PackageInfoR\apackageJ\x04\b\x02\x10\x03\"\x1d\n" +
 	"\x1bListDeployedPackagesRequest\"V\n" +

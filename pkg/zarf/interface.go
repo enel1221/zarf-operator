@@ -29,6 +29,7 @@ type DeployOptions struct {
 	YoloMode                bool
 	RegistryCredentialJSON  []byte
 	HelmDebugEnabled        bool
+	Kubeconfig              []byte
 }
 
 // DeployResult contains the result of a deployment
@@ -120,6 +121,13 @@ type RemoveOptions struct {
 	Timeout           time.Duration
 	NamespaceOverride string
 	SkipVersionCheck  bool
+	Kubeconfig        []byte
+}
+
+// GetDeployedPackageOptions contains options for looking up a deployed package.
+type GetDeployedPackageOptions struct {
+	PackageName string
+	Kubeconfig  []byte
 }
 
 // Client defines the interface for interacting with Zarf
@@ -131,7 +139,7 @@ type Client interface {
 	Remove(ctx context.Context, opts RemoveOptions) error
 
 	// GetDeployedPackage returns information about a deployed package
-	GetDeployedPackage(ctx context.Context, packageName string) (*PackageInfo, error)
+	GetDeployedPackage(ctx context.Context, opts GetDeployedPackageOptions) (*PackageInfo, error)
 
 	// ListDeployedPackages returns all deployed packages
 	ListDeployedPackages(ctx context.Context) ([]PackageInfo, error)

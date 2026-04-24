@@ -34,6 +34,7 @@ type deploymentAffectingSpec struct {
 	Features               []string `json:"features,omitempty"`
 	Architecture           string   `json:"architecture,omitempty"`
 	AdoptExistingResources bool     `json:"adoptExistingResources,omitempty"`
+	ClusterSecretRef       string   `json:"clusterSecretRef,omitempty"`
 }
 
 // DeploymentHash returns a SHA256 hash of the deployment-affecting spec fields.
@@ -48,6 +49,7 @@ func (s *ZarfPackageSpec) DeploymentHash() string {
 		Features:               s.Features,
 		Architecture:           s.Architecture,
 		AdoptExistingResources: s.AdoptExistingResources,
+		ClusterSecretRef:       s.ClusterSecretRef,
 	}
 	data, _ := json.Marshal(das)
 	hash := sha256.Sum256(data)
@@ -161,6 +163,24 @@ type ZarfPackageSpec struct {
 	// OCI pull, so the sidecar can authenticate to private registries.
 	// +optional
 	RegistryCredentialSecretRef string `json:"registryCredentialSecretRef,omitempty"`
+
+	// ClusterSecretRef is the name of a Secret in the same namespace as the
+	// ZarfPackage that provides credentials for deploying to a remote
+	// Kubernetes cluster. When omitted, the package is deployed to the cluster
+	// the operator is running in (default behavior).
+	//
+	// Two Secret shapes are supported, keyed on the "config" entry:
+	//   - vcluster-style: "config" contains a full kubeconfig YAML document.
+	//   - Argo CD cluster-secret style: "config" contains a JSON object with a
+	//     "tlsClientConfig" (caData/certData/keyData) or "bearerToken", paired
+	//     with sibling "server" and (optionally) "name" keys.
+	//
+	// Changing, setting, or clearing this field triggers a redeploy. The
+	// operator does NOT uninstall the previous deployment when the target
+	// cluster changes; any resources on the old cluster are orphaned and must
+	// be cleaned up out-of-band.
+	// +optional
+	ClusterSecretRef string `json:"clusterSecretRef,omitempty"`
 
 	// Tmpdir is the temporary directory for the Zarf package.
 	// +optional

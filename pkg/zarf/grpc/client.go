@@ -96,6 +96,7 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		YoloMode:                opts.YoloMode,
 		RegistryCredentialJson:  opts.RegistryCredentialJSON,
 		HelmDebugEnabled:        opts.HelmDebugEnabled,
+		Kubeconfig:              opts.Kubeconfig,
 	}
 
 	resp, err := c.client.Deploy(ctx, req)
@@ -125,9 +126,13 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 }
 
 // GetDeployedPackage returns information about a deployed package
-func (c *Client) GetDeployedPackage(ctx context.Context, packageName string) (*zarf.PackageInfo, error) {
+func (c *Client) GetDeployedPackage(
+	ctx context.Context,
+	opts zarf.GetDeployedPackageOptions,
+) (*zarf.PackageInfo, error) {
 	resp, err := c.client.GetDeployedPackage(ctx, &zarfv1.GetDeployedPackageRequest{
-		PackageName: packageName,
+		PackageName: opts.PackageName,
+		Kubeconfig:  opts.Kubeconfig,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get deployed package failed: %w", err)
@@ -158,6 +163,7 @@ func (c *Client) Remove(ctx context.Context, opts zarf.RemoveOptions) error {
 		Timeout:           durationpb.New(opts.Timeout),
 		NamespaceOverride: opts.NamespaceOverride,
 		SkipVersionCheck:  opts.SkipVersionCheck,
+		Kubeconfig:        opts.Kubeconfig,
 	}
 
 	_, err := c.client.Remove(ctx, req)

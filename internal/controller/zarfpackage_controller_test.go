@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -78,9 +79,9 @@ func (c *lookupCountingClient) Remove(ctx context.Context, opts zarf.RemoveOptio
 	return c.delegate.Remove(ctx, opts)
 }
 
-func (c *lookupCountingClient) GetDeployedPackage(ctx context.Context, packageName string) (*zarf.PackageInfo, error) {
+func (c *lookupCountingClient) GetDeployedPackage(ctx context.Context, opts zarf.GetDeployedPackageOptions) (*zarf.PackageInfo, error) {
 	c.getDeployedCallCount++
-	return c.delegate.GetDeployedPackage(ctx, packageName)
+	return c.delegate.GetDeployedPackage(ctx, opts)
 }
 
 func (c *lookupCountingClient) ListDeployedPackages(ctx context.Context) ([]zarf.PackageInfo, error) {
@@ -1543,6 +1544,175 @@ var _ = Describe("ZarfPackage Controller", func() {
 
 			recorder := reconciler.recorder.(*record.FakeRecorder)
 			expectEventReason(recorder, ReasonSecretNotFound)
+		})
+	})
+
+	Context("Remote cluster targeting", func() {
+		It("should default to in-cluster when clusterSecretRef is unset", func() {
+			nn := createResource("cluster-default-pkg", true, "oci://example.com/pkg:v1")
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.Kubeconfig).To(BeNil())
+			Expect(getResource(nn).Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+		})
+
+		It("should pass a vcluster-style kubeconfig from the referenced Secret to deploy opts", func() {
+			kubeconfigBytes := []byte(vclusterKubeconfig)
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "vcluster-cred", Namespace: "default"},
+				Data:       map[string][]byte{"config": kubeconfigBytes},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("vcluster-target-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.ClusterSecretRef = "vcluster-cred"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.Kubeconfig).To(Equal(kubeconfigBytes))
+		})
+
+		It("should synthesize a kubeconfig from an Argo-style Secret", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "argo-cred", Namespace: "default"},
+				Data: map[string][]byte{
+					"config": []byte(fakeArgoConfig),
+					"server": []byte("https://example.cluster.local:6443"),
+					"name":   []byte("example"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("argo-target-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.ClusterSecretRef = "argo-cred"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.Kubeconfig).NotTo(BeEmpty())
+
+			parsed, err := clientcmd.Load(capturedOpts.Kubeconfig)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(parsed.Clusters).To(HaveKey("example"))
+			Expect(parsed.Clusters["example"].Server).To(Equal("https://example.cluster.local:6443"))
+		})
+
+		It("should fail with InvalidClusterSecret when the Secret is malformed", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-cred", Namespace: "default"},
+				Data:       map[string][]byte{"config": []byte("not a kubeconfig and not argo JSON")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("bad-target-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.ClusterSecretRef = "bad-cred"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(deployCalled).To(Equal(0))
+			Expect(getResource(nn).Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonInvalidClusterSecret)
+		})
+
+		It("should fail with SecretNotFound when the referenced cluster Secret is missing", func() {
+			nn := createResource("missing-cluster-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.ClusterSecretRef = "nonexistent-cluster-secret"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(deployCalled).To(Equal(0))
+			Expect(getResource(nn).Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonSecretNotFound)
+		})
+
+		It("should propagate the kubeconfig on deletion to Remove opts", func() {
+			kubeconfigBytes := []byte(vclusterKubeconfig)
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "delete-cluster-cred", Namespace: "default"},
+				Data:       map[string][]byte{"config": kubeconfigBytes},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("delete-cluster-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.ClusterSecretRef = "delete-cluster-cred"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			// Seed Status.PackageName so handleDeletion invokes Remove.
+			obj = getResource(nn)
+			obj.Status.PackageName = packageNameToRemove
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			// Trigger deletion.
+			Expect(k8sClient.Delete(ctx, getResource(nn))).To(Succeed())
+
+			var capturedRemove zarf.RemoveOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				return &zarf.DeployResult{PackageName: packageNameToRemove, Version: "v1", Generation: 1}, nil
+			})
+			fakeZarf.RemoveFn = func(_ context.Context, opts zarf.RemoveOptions) error {
+				capturedRemove = opts
+				return nil
+			}
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedRemove.PackageName).To(Equal(packageNameToRemove))
+			Expect(capturedRemove.Kubeconfig).To(Equal(kubeconfigBytes))
 		})
 	})
 })

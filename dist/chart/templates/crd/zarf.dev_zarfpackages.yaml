@@ -64,6 +64,24 @@ spec:
                 description: Architecture is the target architecture for the Zarf
                   package.
                 type: string
+              clusterSecretRef:
+                description: |-
+                  ClusterSecretRef is the name of a Secret in the same namespace as the
+                  ZarfPackage that provides credentials for deploying to a remote
+                  Kubernetes cluster. When omitted, the package is deployed to the cluster
+                  the operator is running in (default behavior).
+
+                  Two Secret shapes are supported, keyed on the "config" entry:
+                    - vcluster-style: "config" contains a full kubeconfig YAML document.
+                    - Argo CD cluster-secret style: "config" contains a JSON object with a
+                      "tlsClientConfig" (caData/certData/keyData) or "bearerToken", paired
+                      with sibling "server" and (optionally) "name" keys.
+
+                  Changing, setting, or clearing this field triggers a redeploy. The
+                  operator does NOT uninstall the previous deployment when the target
+                  cluster changes; any resources on the old cluster are orphaned and must
+                  be cleaned up out-of-band.
+                type: string
               components:
                 description: Components is a list of components to deploy. Adding
                   this field will skip the prompts for selected components.

@@ -15,7 +15,7 @@ type Client struct {
 
 	DeployFn               func(ctx context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error)
 	RemoveFn               func(ctx context.Context, opts zarf.RemoveOptions) error
-	GetDeployedPackageFn   func(ctx context.Context, packageName string) (*zarf.PackageInfo, error)
+	GetDeployedPackageFn   func(ctx context.Context, opts zarf.GetDeployedPackageOptions) (*zarf.PackageInfo, error)
 	ListDeployedPackagesFn func(ctx context.Context) ([]zarf.PackageInfo, error)
 	GetPackageMetadataFn   func(ctx context.Context, source string) (*zarf.PackageMetadata, error)
 
@@ -41,10 +41,10 @@ func New() *Client {
 		return nil
 	}
 
-	c.GetDeployedPackageFn = func(ctx context.Context, packageName string) (*zarf.PackageInfo, error) {
+	c.GetDeployedPackageFn = func(ctx context.Context, opts zarf.GetDeployedPackageOptions) (*zarf.PackageInfo, error) {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
-		if pkg, ok := c.deployedPackages[packageName]; ok {
+		if pkg, ok := c.deployedPackages[opts.PackageName]; ok {
 			return pkg, nil
 		}
 		return nil, nil
@@ -96,7 +96,7 @@ func (c *Client) WithRemove(err error) *Client {
 
 // WithGetDeployedPackage configures the GetDeployedPackage behavior
 func (c *Client) WithGetDeployedPackage(pkg *zarf.PackageInfo, err error) *Client {
-	c.GetDeployedPackageFn = func(context.Context, string) (*zarf.PackageInfo, error) {
+	c.GetDeployedPackageFn = func(context.Context, zarf.GetDeployedPackageOptions) (*zarf.PackageInfo, error) {
 		return pkg, err
 	}
 	return c
@@ -135,8 +135,11 @@ func (c *Client) Remove(ctx context.Context, opts zarf.RemoveOptions) error {
 	return c.RemoveFn(ctx, opts)
 }
 
-func (c *Client) GetDeployedPackage(ctx context.Context, packageName string) (*zarf.PackageInfo, error) {
-	return c.GetDeployedPackageFn(ctx, packageName)
+func (c *Client) GetDeployedPackage(
+	ctx context.Context,
+	opts zarf.GetDeployedPackageOptions,
+) (*zarf.PackageInfo, error) {
+	return c.GetDeployedPackageFn(ctx, opts)
 }
 
 func (c *Client) ListDeployedPackages(ctx context.Context) ([]zarf.PackageInfo, error) {

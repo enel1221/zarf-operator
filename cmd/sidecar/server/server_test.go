@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -269,5 +270,96 @@ func assertCancelled(t *testing.T, cancelled <-chan struct{}, err error) {
 			"should not get ResourceExhausted after cancelling previous deploy: %v",
 			err,
 		)
+	}
+}
+
+func TestApplyKubeconfig_EmptyBytesNoOp(t *testing.T) {
+	orig, hadOrig := os.LookupEnv("KUBECONFIG")
+	t.Cleanup(func() {
+		if hadOrig {
+			_ = os.Setenv("KUBECONFIG", orig)
+		} else {
+			_ = os.Unsetenv("KUBECONFIG")
+		}
+	})
+	_ = os.Unsetenv("KUBECONFIG")
+
+	cleanup, err := applyKubeconfig(slog.Default(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := os.LookupEnv("KUBECONFIG"); ok {
+		t.Fatalf("KUBECONFIG should remain unset when bytes are empty")
+	}
+	cleanup()
+	if _, ok := os.LookupEnv("KUBECONFIG"); ok {
+		t.Fatalf("KUBECONFIG should remain unset after cleanup when bytes are empty")
+	}
+}
+
+func TestApplyKubeconfig_SetsAndRestoresEnv(t *testing.T) {
+	origValue, hadOrig := os.LookupEnv("KUBECONFIG")
+	t.Cleanup(func() {
+		if hadOrig {
+			_ = os.Setenv("KUBECONFIG", origValue)
+		} else {
+			_ = os.Unsetenv("KUBECONFIG")
+		}
+	})
+	_ = os.Unsetenv("KUBECONFIG")
+
+	payload := []byte("placeholder-kubeconfig-content")
+	cleanup, err := applyKubeconfig(slog.Default(), payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	path := os.Getenv("KUBECONFIG")
+	if path == "" {
+		t.Fatalf("KUBECONFIG was not set")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("failed to read kubeconfig tmp file: %v", readErr)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("kubeconfig contents mismatch: got %q want %q", string(got), string(payload))
+	}
+
+	cleanup()
+
+	if _, ok := os.LookupEnv("KUBECONFIG"); ok {
+		t.Fatalf("KUBECONFIG should be unset after cleanup (was unset before apply)")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected kubeconfig tmp file %q to be removed after cleanup, stat err=%v", path, err)
+	}
+}
+
+func TestApplyKubeconfig_RestoresPreexistingEnv(t *testing.T) {
+	const original = "/tmp/does-not-exist-kubeconfig"
+	prev, hadPrev := os.LookupEnv("KUBECONFIG")
+	t.Cleanup(func() {
+		if hadPrev {
+			_ = os.Setenv("KUBECONFIG", prev)
+		} else {
+			_ = os.Unsetenv("KUBECONFIG")
+		}
+	})
+	if err := os.Setenv("KUBECONFIG", original); err != nil {
+		t.Fatalf("setenv: %v", err)
+	}
+
+	cleanup, err := applyKubeconfig(slog.Default(), []byte("x"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if os.Getenv("KUBECONFIG") == original {
+		t.Fatalf("KUBECONFIG was not overridden while applied")
+	}
+	cleanup()
+
+	if got := os.Getenv("KUBECONFIG"); got != original {
+		t.Errorf("KUBECONFIG not restored after cleanup: got %q want %q", got, original)
 	}
 }
