@@ -118,6 +118,44 @@ spec:
                 description: HelmDebugEnabled forces Helm debug logs to be captured
                   for this package deployment.
                 type: boolean
+              initOptions:
+                description: |-
+                  InitOptions configures init-package-specific deployment parameters.
+                  Silently ignored by zarf for non-init packages. Changes here trigger a
+                  redeploy.
+                properties:
+                  registryInfo:
+                    description: RegistryInfo configures the target cluster's zarf
+                      registry.
+                    properties:
+                      address:
+                        description: |-
+                          Address overrides the registry address recorded in the referenced
+                          zarf-state secret (registryInfo.address). Use this when the secret's
+                          address is not reachable from the target cluster — for example, when
+                          initializing a vcluster that pulls from a host-cluster registry exposed
+                          via service replication, the zarf-state secret on the host records an
+                          address like "127.0.0.1:31999" which does not resolve from the vcluster.
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef is the name of a Secret in the same namespace as
+                          the ZarfPackage that matches the shape zarf itself writes under
+                          zarf/zarf-state. The controller parses the Secret's ".data.state" JSON
+                          payload and extracts "registryInfo" (address, nodePort, secret,
+                          pushUsername, pushPassword, pullUsername, pullPassword). Users can sync
+                          the source cluster's zarf-state secret into the ZarfPackage's namespace
+                          rather than authoring a custom secret.
+                        type: string
+                      nodePort:
+                        description: |-
+                          NodePort overrides the registry NodePort recorded in the referenced
+                          zarf-state secret (registryInfo.nodePort). Only meaningful when zarf's
+                          internal registry is deployed; ignored once an external Address is set.
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
               insecureSkipTLSVerify:
                 description: InsecureSkipTLSVerify indicates whether to skip TLS verification
                   for the Zarf package.

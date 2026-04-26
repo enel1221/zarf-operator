@@ -97,6 +97,7 @@ func (c *Client) Deploy(ctx context.Context, opts zarf.DeployOptions) (*zarf.Dep
 		RegistryCredentialJson:  opts.RegistryCredentialJSON,
 		HelmDebugEnabled:        opts.HelmDebugEnabled,
 		Kubeconfig:              opts.Kubeconfig,
+		InitOptions:             initOptionsToProto(opts.InitOptions),
 	}
 
 	resp, err := c.client.Deploy(ctx, req)
@@ -194,6 +195,23 @@ func (c *Client) GetPackageMetadata(ctx context.Context, source string) (*zarf.P
 // Close closes the gRPC connection
 func (c *Client) Close() error {
 	return c.conn.Close()
+}
+
+// initOptionsToProto maps the zarf package InitOptions to the gRPC wire
+// shape. Returns nil for nil input so the proto field stays unset.
+func initOptionsToProto(opts *zarf.InitOptions) *zarfv1.InitOptions {
+	if opts == nil {
+		return nil
+	}
+	return &zarfv1.InitOptions{
+		RegistryAddress:      opts.RegistryAddress,
+		RegistryNodePort:     opts.RegistryNodePort,
+		RegistrySecret:       opts.RegistrySecret,
+		RegistryPushUsername: opts.RegistryPushUsername,
+		RegistryPushPassword: opts.RegistryPushPassword,
+		RegistryPullUsername: opts.RegistryPullUsername,
+		RegistryPullPassword: opts.RegistryPullPassword,
+	}
 }
 
 // Helper functions for type conversion

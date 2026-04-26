@@ -26,15 +26,16 @@ import (
 
 // deploymentAffectingSpec contains only the fields that require redeployment when changed
 type deploymentAffectingSpec struct {
-	Source                 string   `json:"source"`
-	Components             []string `json:"components,omitempty"`
-	Namespace              string   `json:"namespace,omitempty"`
-	Set                    []string `json:"set,omitempty"`
-	Shasum                 string   `json:"shasum,omitempty"`
-	Features               []string `json:"features,omitempty"`
-	Architecture           string   `json:"architecture,omitempty"`
-	AdoptExistingResources bool     `json:"adoptExistingResources,omitempty"`
-	ClusterSecretRef       string   `json:"clusterSecretRef,omitempty"`
+	Source                 string       `json:"source"`
+	Components             []string     `json:"components,omitempty"`
+	Namespace              string       `json:"namespace,omitempty"`
+	Set                    []string     `json:"set,omitempty"`
+	Shasum                 string       `json:"shasum,omitempty"`
+	Features               []string     `json:"features,omitempty"`
+	Architecture           string       `json:"architecture,omitempty"`
+	AdoptExistingResources bool         `json:"adoptExistingResources,omitempty"`
+	ClusterSecretRef       string       `json:"clusterSecretRef,omitempty"`
+	InitOptions            *InitOptions `json:"initOptions,omitempty"`
 }
 
 // DeploymentHash returns a SHA256 hash of the deployment-affecting spec fields.
@@ -50,6 +51,7 @@ func (s *ZarfPackageSpec) DeploymentHash() string {
 		Architecture:           s.Architecture,
 		AdoptExistingResources: s.AdoptExistingResources,
 		ClusterSecretRef:       s.ClusterSecretRef,
+		InitOptions:            s.InitOptions,
 	}
 	data, _ := json.Marshal(das)
 	hash := sha256.Sum256(data)
@@ -66,6 +68,47 @@ type DependsOnReference struct {
 	// Namespace of the dependency. Defaults to the same namespace as this package when omitted.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+}
+
+// RegistryInfoOptions configures the target cluster's container registry for
+// an init package deployment. See InitOptions for overall semantics.
+type RegistryInfoOptions struct {
+	// Address overrides the registry address recorded in the referenced
+	// zarf-state secret (registryInfo.address). Use this when the secret's
+	// address is not reachable from the target cluster — for example, when
+	// initializing a vcluster that pulls from a host-cluster registry exposed
+	// via service replication, the zarf-state secret on the host records an
+	// address like "127.0.0.1:31999" which does not resolve from the vcluster.
+	// +optional
+	Address string `json:"address,omitempty"`
+
+	// NodePort overrides the registry NodePort recorded in the referenced
+	// zarf-state secret (registryInfo.nodePort). Only meaningful when zarf's
+	// internal registry is deployed; ignored once an external Address is set.
+	// +optional
+	NodePort int32 `json:"nodePort,omitempty"`
+
+	// CredentialsSecretRef is the name of a Secret in the same namespace as
+	// the ZarfPackage that matches the shape zarf itself writes under
+	// zarf/zarf-state. The controller parses the Secret's ".data.state" JSON
+	// payload and extracts "registryInfo" (address, nodePort, secret,
+	// pushUsername, pushPassword, pullUsername, pullPassword). Users can sync
+	// the source cluster's zarf-state secret into the ZarfPackage's namespace
+	// rather than authoring a custom secret.
+	// +optional
+	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
+}
+
+// InitOptions configures init-package-specific deployment parameters such as
+// the target registry. Zarf's SDK honors these fields only when the package's
+// "kind" is "ZarfInitConfig"; other packages silently ignore them. When
+// RegistryInfo.Address is non-empty, zarf automatically skips the in-cluster
+// registry components (zarf-injector, zarf-seed-registry, zarf-registry) —
+// useful for initializing a vcluster that reuses the host cluster's registry.
+type InitOptions struct {
+	// RegistryInfo configures the target cluster's zarf registry.
+	// +optional
+	RegistryInfo *RegistryInfoOptions `json:"registryInfo,omitempty"`
 }
 
 // ZarfPackageSpec defines the desired state of ZarfPackage.
@@ -210,6 +253,12 @@ type ZarfPackageSpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	Suspend bool `json:"suspend,omitempty"`
+
+	// InitOptions configures init-package-specific deployment parameters.
+	// Silently ignored by zarf for non-init packages. Changes here trigger a
+	// redeploy.
+	// +optional
+	InitOptions *InitOptions `json:"initOptions,omitempty"`
 }
 
 // SyncPolicy defines how the operator handles drift between desired and actual state

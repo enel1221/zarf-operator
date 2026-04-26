@@ -381,6 +381,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		OCIConcurrency:         int(req.OciConcurrency),
 		IsInteractive:          false,
 		SkipVersionCheck:       req.SkipVersionCheck,
+		RegistryInfo:           buildRegistryInfo(req.InitOptions),
 		RemoteOptions: packager.RemoteOptions{
 			PlainHTTP:             req.PlainHttp,
 			InsecureSkipTLSVerify: req.InsecureSkipTlsVerify,
@@ -755,4 +756,24 @@ func (s *ZarfServer) getClusterArchitecture(ctx context.Context) (string, error)
 	}
 
 	return arch, nil
+}
+
+// buildRegistryInfo maps the gRPC InitOptions message to zarf's
+// state.RegistryInfo. Returns the zero value when opts is nil so zarf falls
+// back to its defaults (internal in-cluster registry). When
+// RegistryInfo.Address is non-empty, zarf's Deploy automatically skips the
+// zarf-injector, zarf-seed-registry, and zarf-registry components.
+func buildRegistryInfo(opts *zarfv1.InitOptions) state.RegistryInfo {
+	if opts == nil {
+		return state.RegistryInfo{}
+	}
+	return state.RegistryInfo{
+		Address:      opts.RegistryAddress,
+		NodePort:     int(opts.RegistryNodePort),
+		Secret:       opts.RegistrySecret,
+		PushUsername: opts.RegistryPushUsername,
+		PushPassword: opts.RegistryPushPassword,
+		PullUsername: opts.RegistryPullUsername,
+		PullPassword: opts.RegistryPullPassword,
+	}
 }

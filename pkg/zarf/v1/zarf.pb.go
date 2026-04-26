@@ -46,6 +46,7 @@ type DeployRequest struct {
 	RegistryCredentialJson  []byte                 `protobuf:"bytes,20,opt,name=registry_credential_json,json=registryCredentialJson,proto3" json:"registry_credential_json,omitempty"`
 	HelmDebugEnabled        bool                   `protobuf:"varint,21,opt,name=helm_debug_enabled,json=helmDebugEnabled,proto3" json:"helm_debug_enabled,omitempty"`
 	Kubeconfig              []byte                 `protobuf:"bytes,22,opt,name=kubeconfig,proto3" json:"kubeconfig,omitempty"`
+	InitOptions             *InitOptions           `protobuf:"bytes,23,opt,name=init_options,json=initOptions,proto3" json:"init_options,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -234,6 +235,108 @@ func (x *DeployRequest) GetKubeconfig() []byte {
 	return nil
 }
 
+func (x *DeployRequest) GetInitOptions() *InitOptions {
+	if x != nil {
+		return x.InitOptions
+	}
+	return nil
+}
+
+// InitOptions carries init-package-specific deploy configuration that maps
+// to zarf's state.RegistryInfo. Zarf silently ignores these fields for
+// non-init packages (kind != ZarfInitConfig).
+type InitOptions struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	RegistryAddress      string                 `protobuf:"bytes,1,opt,name=registry_address,json=registryAddress,proto3" json:"registry_address,omitempty"`
+	RegistryNodePort     int32                  `protobuf:"varint,2,opt,name=registry_node_port,json=registryNodePort,proto3" json:"registry_node_port,omitempty"`
+	RegistrySecret       string                 `protobuf:"bytes,3,opt,name=registry_secret,json=registrySecret,proto3" json:"registry_secret,omitempty"`
+	RegistryPushUsername string                 `protobuf:"bytes,4,opt,name=registry_push_username,json=registryPushUsername,proto3" json:"registry_push_username,omitempty"`
+	RegistryPushPassword string                 `protobuf:"bytes,5,opt,name=registry_push_password,json=registryPushPassword,proto3" json:"registry_push_password,omitempty"`
+	RegistryPullUsername string                 `protobuf:"bytes,6,opt,name=registry_pull_username,json=registryPullUsername,proto3" json:"registry_pull_username,omitempty"`
+	RegistryPullPassword string                 `protobuf:"bytes,7,opt,name=registry_pull_password,json=registryPullPassword,proto3" json:"registry_pull_password,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *InitOptions) Reset() {
+	*x = InitOptions{}
+	mi := &file_zarf_v1_zarf_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InitOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InitOptions) ProtoMessage() {}
+
+func (x *InitOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_zarf_v1_zarf_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InitOptions.ProtoReflect.Descriptor instead.
+func (*InitOptions) Descriptor() ([]byte, []int) {
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *InitOptions) GetRegistryAddress() string {
+	if x != nil {
+		return x.RegistryAddress
+	}
+	return ""
+}
+
+func (x *InitOptions) GetRegistryNodePort() int32 {
+	if x != nil {
+		return x.RegistryNodePort
+	}
+	return 0
+}
+
+func (x *InitOptions) GetRegistrySecret() string {
+	if x != nil {
+		return x.RegistrySecret
+	}
+	return ""
+}
+
+func (x *InitOptions) GetRegistryPushUsername() string {
+	if x != nil {
+		return x.RegistryPushUsername
+	}
+	return ""
+}
+
+func (x *InitOptions) GetRegistryPushPassword() string {
+	if x != nil {
+		return x.RegistryPushPassword
+	}
+	return ""
+}
+
+func (x *InitOptions) GetRegistryPullUsername() string {
+	if x != nil {
+		return x.RegistryPullUsername
+	}
+	return ""
+}
+
+func (x *InitOptions) GetRegistryPullPassword() string {
+	if x != nil {
+		return x.RegistryPullPassword
+	}
+	return ""
+}
+
 type DeployResponse struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	PackageName        string                 `protobuf:"bytes,1,opt,name=package_name,json=packageName,proto3" json:"package_name,omitempty"`
@@ -247,7 +350,7 @@ type DeployResponse struct {
 
 func (x *DeployResponse) Reset() {
 	*x = DeployResponse{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[1]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -259,7 +362,7 @@ func (x *DeployResponse) String() string {
 func (*DeployResponse) ProtoMessage() {}
 
 func (x *DeployResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[1]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -272,7 +375,7 @@ func (x *DeployResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployResponse.ProtoReflect.Descriptor instead.
 func (*DeployResponse) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{1}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *DeployResponse) GetPackageName() string {
@@ -322,7 +425,7 @@ type DeployErrorDetail struct {
 
 func (x *DeployErrorDetail) Reset() {
 	*x = DeployErrorDetail{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[2]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -334,7 +437,7 @@ func (x *DeployErrorDetail) String() string {
 func (*DeployErrorDetail) ProtoMessage() {}
 
 func (x *DeployErrorDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[2]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -347,7 +450,7 @@ func (x *DeployErrorDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployErrorDetail.ProtoReflect.Descriptor instead.
 func (*DeployErrorDetail) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{2}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *DeployErrorDetail) GetFailedComponent() string {
@@ -390,7 +493,7 @@ type DeployedComponent struct {
 
 func (x *DeployedComponent) Reset() {
 	*x = DeployedComponent{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[3]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -402,7 +505,7 @@ func (x *DeployedComponent) String() string {
 func (*DeployedComponent) ProtoMessage() {}
 
 func (x *DeployedComponent) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[3]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -415,7 +518,7 @@ func (x *DeployedComponent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployedComponent.ProtoReflect.Descriptor instead.
 func (*DeployedComponent) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{3}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DeployedComponent) GetName() string {
@@ -457,7 +560,7 @@ type InstalledChart struct {
 
 func (x *InstalledChart) Reset() {
 	*x = InstalledChart{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[4]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -469,7 +572,7 @@ func (x *InstalledChart) String() string {
 func (*InstalledChart) ProtoMessage() {}
 
 func (x *InstalledChart) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[4]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -482,7 +585,7 @@ func (x *InstalledChart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstalledChart.ProtoReflect.Descriptor instead.
 func (*InstalledChart) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{4}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InstalledChart) GetNamespace() string {
@@ -520,7 +623,7 @@ type RemoveRequest struct {
 
 func (x *RemoveRequest) Reset() {
 	*x = RemoveRequest{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[5]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -532,7 +635,7 @@ func (x *RemoveRequest) String() string {
 func (*RemoveRequest) ProtoMessage() {}
 
 func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[5]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -545,7 +648,7 @@ func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveRequest.ProtoReflect.Descriptor instead.
 func (*RemoveRequest) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{5}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RemoveRequest) GetPackageName() string {
@@ -598,7 +701,7 @@ type RemoveResponse struct {
 
 func (x *RemoveResponse) Reset() {
 	*x = RemoveResponse{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[6]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -610,7 +713,7 @@ func (x *RemoveResponse) String() string {
 func (*RemoveResponse) ProtoMessage() {}
 
 func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[6]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -623,7 +726,7 @@ func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveResponse.ProtoReflect.Descriptor instead.
 func (*RemoveResponse) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{6}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{7}
 }
 
 type GetDeployedPackageRequest struct {
@@ -636,7 +739,7 @@ type GetDeployedPackageRequest struct {
 
 func (x *GetDeployedPackageRequest) Reset() {
 	*x = GetDeployedPackageRequest{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[7]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +751,7 @@ func (x *GetDeployedPackageRequest) String() string {
 func (*GetDeployedPackageRequest) ProtoMessage() {}
 
 func (x *GetDeployedPackageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[7]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +764,7 @@ func (x *GetDeployedPackageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDeployedPackageRequest.ProtoReflect.Descriptor instead.
 func (*GetDeployedPackageRequest) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{7}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetDeployedPackageRequest) GetPackageName() string {
@@ -687,7 +790,7 @@ type GetDeployedPackageResponse struct {
 
 func (x *GetDeployedPackageResponse) Reset() {
 	*x = GetDeployedPackageResponse{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[8]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -699,7 +802,7 @@ func (x *GetDeployedPackageResponse) String() string {
 func (*GetDeployedPackageResponse) ProtoMessage() {}
 
 func (x *GetDeployedPackageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[8]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -712,7 +815,7 @@ func (x *GetDeployedPackageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDeployedPackageResponse.ProtoReflect.Descriptor instead.
 func (*GetDeployedPackageResponse) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{8}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetDeployedPackageResponse) GetPackage() *PackageInfo {
@@ -730,7 +833,7 @@ type ListDeployedPackagesRequest struct {
 
 func (x *ListDeployedPackagesRequest) Reset() {
 	*x = ListDeployedPackagesRequest{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[9]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -742,7 +845,7 @@ func (x *ListDeployedPackagesRequest) String() string {
 func (*ListDeployedPackagesRequest) ProtoMessage() {}
 
 func (x *ListDeployedPackagesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[9]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -755,7 +858,7 @@ func (x *ListDeployedPackagesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDeployedPackagesRequest.ProtoReflect.Descriptor instead.
 func (*ListDeployedPackagesRequest) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{9}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{10}
 }
 
 type ListDeployedPackagesResponse struct {
@@ -767,7 +870,7 @@ type ListDeployedPackagesResponse struct {
 
 func (x *ListDeployedPackagesResponse) Reset() {
 	*x = ListDeployedPackagesResponse{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[10]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -779,7 +882,7 @@ func (x *ListDeployedPackagesResponse) String() string {
 func (*ListDeployedPackagesResponse) ProtoMessage() {}
 
 func (x *ListDeployedPackagesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[10]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -792,7 +895,7 @@ func (x *ListDeployedPackagesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDeployedPackagesResponse.ProtoReflect.Descriptor instead.
 func (*ListDeployedPackagesResponse) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{10}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListDeployedPackagesResponse) GetPackages() []*PackageInfo {
@@ -816,7 +919,7 @@ type PackageInfo struct {
 
 func (x *PackageInfo) Reset() {
 	*x = PackageInfo{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[11]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -828,7 +931,7 @@ func (x *PackageInfo) String() string {
 func (*PackageInfo) ProtoMessage() {}
 
 func (x *PackageInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[11]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -841,7 +944,7 @@ func (x *PackageInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackageInfo.ProtoReflect.Descriptor instead.
 func (*PackageInfo) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{11}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PackageInfo) GetName() string {
@@ -895,7 +998,7 @@ type GetPackageMetadataRequest struct {
 
 func (x *GetPackageMetadataRequest) Reset() {
 	*x = GetPackageMetadataRequest{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[12]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -907,7 +1010,7 @@ func (x *GetPackageMetadataRequest) String() string {
 func (*GetPackageMetadataRequest) ProtoMessage() {}
 
 func (x *GetPackageMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[12]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -920,7 +1023,7 @@ func (x *GetPackageMetadataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPackageMetadataRequest.ProtoReflect.Descriptor instead.
 func (*GetPackageMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{12}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetPackageMetadataRequest) GetSource() string {
@@ -939,7 +1042,7 @@ type GetPackageMetadataResponse struct {
 
 func (x *GetPackageMetadataResponse) Reset() {
 	*x = GetPackageMetadataResponse{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[13]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +1054,7 @@ func (x *GetPackageMetadataResponse) String() string {
 func (*GetPackageMetadataResponse) ProtoMessage() {}
 
 func (x *GetPackageMetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[13]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +1067,7 @@ func (x *GetPackageMetadataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPackageMetadataResponse.ProtoReflect.Descriptor instead.
 func (*GetPackageMetadataResponse) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{13}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetPackageMetadataResponse) GetMetadata() *PackageMetadata {
@@ -987,7 +1090,7 @@ type PackageMetadata struct {
 
 func (x *PackageMetadata) Reset() {
 	*x = PackageMetadata{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[14]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -999,7 +1102,7 @@ func (x *PackageMetadata) String() string {
 func (*PackageMetadata) ProtoMessage() {}
 
 func (x *PackageMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[14]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1012,7 +1115,7 @@ func (x *PackageMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackageMetadata.ProtoReflect.Descriptor instead.
 func (*PackageMetadata) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{14}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PackageMetadata) GetName() string {
@@ -1058,7 +1161,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[15]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1173,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[15]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1186,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{15}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{16}
 }
 
 type HealthResponse struct {
@@ -1097,7 +1200,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_zarf_v1_zarf_proto_msgTypes[16]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1109,7 +1212,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zarf_v1_zarf_proto_msgTypes[16]
+	mi := &file_zarf_v1_zarf_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1122,7 +1225,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{16}
+	return file_zarf_v1_zarf_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *HealthResponse) GetHealthy() bool {
@@ -1150,7 +1253,7 @@ var File_zarf_v1_zarf_proto protoreflect.FileDescriptor
 
 const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\n" +
-	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\xda\a\n" +
+	"\x12zarf/v1/zarf.proto\x12\azarf.v1\x1a\x1egoogle/protobuf/duration.proto\"\x93\b\n" +
 	"\rDeployRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1e\n" +
 	"\n" +
@@ -1180,10 +1283,19 @@ const file_zarf_v1_zarf_proto_rawDesc = "" +
 	"\x12helm_debug_enabled\x18\x15 \x01(\bR\x10helmDebugEnabled\x12\x1e\n" +
 	"\n" +
 	"kubeconfig\x18\x16 \x01(\fR\n" +
-	"kubeconfig\x1a?\n" +
+	"kubeconfig\x127\n" +
+	"\finit_options\x18\x17 \x01(\v2\x14.zarf.v1.InitOptionsR\vinitOptions\x1a?\n" +
 	"\x11SetVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe1\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe7\x02\n" +
+	"\vInitOptions\x12)\n" +
+	"\x10registry_address\x18\x01 \x01(\tR\x0fregistryAddress\x12,\n" +
+	"\x12registry_node_port\x18\x02 \x01(\x05R\x10registryNodePort\x12'\n" +
+	"\x0fregistry_secret\x18\x03 \x01(\tR\x0eregistrySecret\x124\n" +
+	"\x16registry_push_username\x18\x04 \x01(\tR\x14registryPushUsername\x124\n" +
+	"\x16registry_push_password\x18\x05 \x01(\tR\x14registryPushPassword\x124\n" +
+	"\x16registry_pull_username\x18\x06 \x01(\tR\x14registryPullUsername\x124\n" +
+	"\x16registry_pull_password\x18\a \x01(\tR\x14registryPullPassword\"\xe1\x01\n" +
 	"\x0eDeployResponse\x12!\n" +
 	"\fpackage_name\x18\x01 \x01(\tR\vpackageName\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1e\n" +
@@ -1278,55 +1390,57 @@ func file_zarf_v1_zarf_proto_rawDescGZIP() []byte {
 	return file_zarf_v1_zarf_proto_rawDescData
 }
 
-var file_zarf_v1_zarf_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_zarf_v1_zarf_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_zarf_v1_zarf_proto_goTypes = []any{
 	(*DeployRequest)(nil),                // 0: zarf.v1.DeployRequest
-	(*DeployResponse)(nil),               // 1: zarf.v1.DeployResponse
-	(*DeployErrorDetail)(nil),            // 2: zarf.v1.DeployErrorDetail
-	(*DeployedComponent)(nil),            // 3: zarf.v1.DeployedComponent
-	(*InstalledChart)(nil),               // 4: zarf.v1.InstalledChart
-	(*RemoveRequest)(nil),                // 5: zarf.v1.RemoveRequest
-	(*RemoveResponse)(nil),               // 6: zarf.v1.RemoveResponse
-	(*GetDeployedPackageRequest)(nil),    // 7: zarf.v1.GetDeployedPackageRequest
-	(*GetDeployedPackageResponse)(nil),   // 8: zarf.v1.GetDeployedPackageResponse
-	(*ListDeployedPackagesRequest)(nil),  // 9: zarf.v1.ListDeployedPackagesRequest
-	(*ListDeployedPackagesResponse)(nil), // 10: zarf.v1.ListDeployedPackagesResponse
-	(*PackageInfo)(nil),                  // 11: zarf.v1.PackageInfo
-	(*GetPackageMetadataRequest)(nil),    // 12: zarf.v1.GetPackageMetadataRequest
-	(*GetPackageMetadataResponse)(nil),   // 13: zarf.v1.GetPackageMetadataResponse
-	(*PackageMetadata)(nil),              // 14: zarf.v1.PackageMetadata
-	(*HealthRequest)(nil),                // 15: zarf.v1.HealthRequest
-	(*HealthResponse)(nil),               // 16: zarf.v1.HealthResponse
-	nil,                                  // 17: zarf.v1.DeployRequest.SetVariablesEntry
-	(*durationpb.Duration)(nil),          // 18: google.protobuf.Duration
+	(*InitOptions)(nil),                  // 1: zarf.v1.InitOptions
+	(*DeployResponse)(nil),               // 2: zarf.v1.DeployResponse
+	(*DeployErrorDetail)(nil),            // 3: zarf.v1.DeployErrorDetail
+	(*DeployedComponent)(nil),            // 4: zarf.v1.DeployedComponent
+	(*InstalledChart)(nil),               // 5: zarf.v1.InstalledChart
+	(*RemoveRequest)(nil),                // 6: zarf.v1.RemoveRequest
+	(*RemoveResponse)(nil),               // 7: zarf.v1.RemoveResponse
+	(*GetDeployedPackageRequest)(nil),    // 8: zarf.v1.GetDeployedPackageRequest
+	(*GetDeployedPackageResponse)(nil),   // 9: zarf.v1.GetDeployedPackageResponse
+	(*ListDeployedPackagesRequest)(nil),  // 10: zarf.v1.ListDeployedPackagesRequest
+	(*ListDeployedPackagesResponse)(nil), // 11: zarf.v1.ListDeployedPackagesResponse
+	(*PackageInfo)(nil),                  // 12: zarf.v1.PackageInfo
+	(*GetPackageMetadataRequest)(nil),    // 13: zarf.v1.GetPackageMetadataRequest
+	(*GetPackageMetadataResponse)(nil),   // 14: zarf.v1.GetPackageMetadataResponse
+	(*PackageMetadata)(nil),              // 15: zarf.v1.PackageMetadata
+	(*HealthRequest)(nil),                // 16: zarf.v1.HealthRequest
+	(*HealthResponse)(nil),               // 17: zarf.v1.HealthResponse
+	nil,                                  // 18: zarf.v1.DeployRequest.SetVariablesEntry
+	(*durationpb.Duration)(nil),          // 19: google.protobuf.Duration
 }
 var file_zarf_v1_zarf_proto_depIdxs = []int32{
-	17, // 0: zarf.v1.DeployRequest.set_variables:type_name -> zarf.v1.DeployRequest.SetVariablesEntry
-	18, // 1: zarf.v1.DeployRequest.timeout:type_name -> google.protobuf.Duration
-	3,  // 2: zarf.v1.DeployResponse.deployed_components:type_name -> zarf.v1.DeployedComponent
-	4,  // 3: zarf.v1.DeployedComponent.installed_charts:type_name -> zarf.v1.InstalledChart
-	18, // 4: zarf.v1.RemoveRequest.timeout:type_name -> google.protobuf.Duration
-	11, // 5: zarf.v1.GetDeployedPackageResponse.package:type_name -> zarf.v1.PackageInfo
-	11, // 6: zarf.v1.ListDeployedPackagesResponse.packages:type_name -> zarf.v1.PackageInfo
-	3,  // 7: zarf.v1.PackageInfo.deployed_components:type_name -> zarf.v1.DeployedComponent
-	14, // 8: zarf.v1.GetPackageMetadataResponse.metadata:type_name -> zarf.v1.PackageMetadata
-	0,  // 9: zarf.v1.ZarfService.Deploy:input_type -> zarf.v1.DeployRequest
-	5,  // 10: zarf.v1.ZarfService.Remove:input_type -> zarf.v1.RemoveRequest
-	7,  // 11: zarf.v1.ZarfService.GetDeployedPackage:input_type -> zarf.v1.GetDeployedPackageRequest
-	9,  // 12: zarf.v1.ZarfService.ListDeployedPackages:input_type -> zarf.v1.ListDeployedPackagesRequest
-	12, // 13: zarf.v1.ZarfService.GetPackageMetadata:input_type -> zarf.v1.GetPackageMetadataRequest
-	15, // 14: zarf.v1.ZarfService.Health:input_type -> zarf.v1.HealthRequest
-	1,  // 15: zarf.v1.ZarfService.Deploy:output_type -> zarf.v1.DeployResponse
-	6,  // 16: zarf.v1.ZarfService.Remove:output_type -> zarf.v1.RemoveResponse
-	8,  // 17: zarf.v1.ZarfService.GetDeployedPackage:output_type -> zarf.v1.GetDeployedPackageResponse
-	10, // 18: zarf.v1.ZarfService.ListDeployedPackages:output_type -> zarf.v1.ListDeployedPackagesResponse
-	13, // 19: zarf.v1.ZarfService.GetPackageMetadata:output_type -> zarf.v1.GetPackageMetadataResponse
-	16, // 20: zarf.v1.ZarfService.Health:output_type -> zarf.v1.HealthResponse
-	15, // [15:21] is the sub-list for method output_type
-	9,  // [9:15] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	18, // 0: zarf.v1.DeployRequest.set_variables:type_name -> zarf.v1.DeployRequest.SetVariablesEntry
+	19, // 1: zarf.v1.DeployRequest.timeout:type_name -> google.protobuf.Duration
+	1,  // 2: zarf.v1.DeployRequest.init_options:type_name -> zarf.v1.InitOptions
+	4,  // 3: zarf.v1.DeployResponse.deployed_components:type_name -> zarf.v1.DeployedComponent
+	5,  // 4: zarf.v1.DeployedComponent.installed_charts:type_name -> zarf.v1.InstalledChart
+	19, // 5: zarf.v1.RemoveRequest.timeout:type_name -> google.protobuf.Duration
+	12, // 6: zarf.v1.GetDeployedPackageResponse.package:type_name -> zarf.v1.PackageInfo
+	12, // 7: zarf.v1.ListDeployedPackagesResponse.packages:type_name -> zarf.v1.PackageInfo
+	4,  // 8: zarf.v1.PackageInfo.deployed_components:type_name -> zarf.v1.DeployedComponent
+	15, // 9: zarf.v1.GetPackageMetadataResponse.metadata:type_name -> zarf.v1.PackageMetadata
+	0,  // 10: zarf.v1.ZarfService.Deploy:input_type -> zarf.v1.DeployRequest
+	6,  // 11: zarf.v1.ZarfService.Remove:input_type -> zarf.v1.RemoveRequest
+	8,  // 12: zarf.v1.ZarfService.GetDeployedPackage:input_type -> zarf.v1.GetDeployedPackageRequest
+	10, // 13: zarf.v1.ZarfService.ListDeployedPackages:input_type -> zarf.v1.ListDeployedPackagesRequest
+	13, // 14: zarf.v1.ZarfService.GetPackageMetadata:input_type -> zarf.v1.GetPackageMetadataRequest
+	16, // 15: zarf.v1.ZarfService.Health:input_type -> zarf.v1.HealthRequest
+	2,  // 16: zarf.v1.ZarfService.Deploy:output_type -> zarf.v1.DeployResponse
+	7,  // 17: zarf.v1.ZarfService.Remove:output_type -> zarf.v1.RemoveResponse
+	9,  // 18: zarf.v1.ZarfService.GetDeployedPackage:output_type -> zarf.v1.GetDeployedPackageResponse
+	11, // 19: zarf.v1.ZarfService.ListDeployedPackages:output_type -> zarf.v1.ListDeployedPackagesResponse
+	14, // 20: zarf.v1.ZarfService.GetPackageMetadata:output_type -> zarf.v1.GetPackageMetadataResponse
+	17, // 21: zarf.v1.ZarfService.Health:output_type -> zarf.v1.HealthResponse
+	16, // [16:22] is the sub-list for method output_type
+	10, // [10:16] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_zarf_v1_zarf_proto_init() }
@@ -1340,7 +1454,7 @@ func file_zarf_v1_zarf_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zarf_v1_zarf_proto_rawDesc), len(file_zarf_v1_zarf_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

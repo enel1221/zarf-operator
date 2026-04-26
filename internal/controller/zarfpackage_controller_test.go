@@ -1715,4 +1715,189 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(capturedRemove.Kubeconfig).To(Equal(kubeconfigBytes))
 		})
 	})
+
+	Context("Init options", func() {
+		It("should leave InitOptions nil when spec.initOptions is unset", func() {
+			nn := createResource("init-nil-pkg", true, "oci://example.com/pkg:v1")
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.InitOptions).To(BeNil())
+		})
+
+		It("should populate InitOptions from a zarf-state Secret", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "zarf-state", Namespace: "default"},
+				Data:       map[string][]byte{"state": []byte(internalRegistryStateJSON)},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("init-state-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{
+					CredentialsSecretRef: "zarf-state",
+				},
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.InitOptions).NotTo(BeNil())
+			Expect(capturedOpts.InitOptions.RegistryAddress).To(Equal("127.0.0.1:31999"))
+			Expect(capturedOpts.InitOptions.RegistryNodePort).To(Equal(int32(31999)))
+			Expect(capturedOpts.InitOptions.RegistryPushUsername).To(Equal("zarf-push"))
+			Expect(capturedOpts.InitOptions.RegistryPullUsername).To(Equal("zarf-pull"))
+			Expect(capturedOpts.InitOptions.RegistrySecret).To(Equal("zarf-agent-secret-placeholder"))
+		})
+
+		It("should honor CR-level address override atop secret-sourced creds", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "zarf-state-override", Namespace: "default"},
+				Data:       map[string][]byte{"state": []byte(internalRegistryStateJSON)},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("init-override-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{
+					Address:              "zarf-docker-registry.zarf.svc.cluster.local:5000",
+					CredentialsSecretRef: "zarf-state-override",
+				},
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.InitOptions).NotTo(BeNil())
+			Expect(capturedOpts.InitOptions.RegistryAddress).To(Equal("zarf-docker-registry.zarf.svc.cluster.local:5000"))
+			// Creds still come from the secret.
+			Expect(capturedOpts.InitOptions.RegistryPushUsername).To(Equal("zarf-push"))
+		})
+
+		It("should pass only Address when no secret ref is provided", func() {
+			nn := createResource("init-address-only-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{
+					Address: "example.registry:5000",
+				},
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var capturedOpts zarf.DeployOptions
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+				capturedOpts = opts
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedOpts.InitOptions).NotTo(BeNil())
+			Expect(capturedOpts.InitOptions.RegistryAddress).To(Equal("example.registry:5000"))
+			Expect(capturedOpts.InitOptions.RegistryPushUsername).To(BeEmpty())
+			Expect(capturedOpts.InitOptions.RegistrySecret).To(BeEmpty())
+		})
+
+		It("should fail with SecretNotFound when credentialsSecretRef Secret is missing", func() {
+			nn := createResource("init-missing-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{
+					CredentialsSecretRef: "nonexistent-zarf-state",
+				},
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(deployCalled).To(Equal(0))
+			Expect(getResource(nn).Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonSecretNotFound)
+		})
+
+		It("should fail with InvalidInitSecret when the Secret is malformed", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-zarf-state", Namespace: "default"},
+				Data:       map[string][]byte{"state": []byte("this is not json")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			nn := createResource("init-bad-pkg", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{
+					CredentialsSecretRef: "bad-zarf-state",
+				},
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+				deployCalled++
+				return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+			})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(deployCalled).To(Equal(0))
+			Expect(getResource(nn).Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+
+			recorder := reconciler.recorder.(*record.FakeRecorder)
+			expectEventReason(recorder, ReasonInvalidInitSecret)
+		})
+
+		It("should include initOptions in DeploymentHash so changes force redeploy", func() {
+			base := opsv1alpha1.ZarfPackageSpec{Source: "oci://example.com/pkg:v1"}
+			withX := base
+			withX.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{Address: "x.example:5000"},
+			}
+			Expect(base.DeploymentHash()).NotTo(Equal(withX.DeploymentHash()))
+
+			withY := base
+			withY.InitOptions = &opsv1alpha1.InitOptions{
+				RegistryInfo: &opsv1alpha1.RegistryInfoOptions{Address: "y.example:5000"},
+			}
+			Expect(withY.DeploymentHash()).NotTo(Equal(withX.DeploymentHash()))
+		})
+	})
 })

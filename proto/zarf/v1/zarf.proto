@@ -49,6 +49,20 @@ message DeployRequest {
     bytes registry_credential_json = 20;
     bool helm_debug_enabled = 21;
     bytes kubeconfig = 22;
+    InitOptions init_options = 23;
+}
+
+// InitOptions carries init-package-specific deploy configuration that maps
+// to zarf's state.RegistryInfo. Zarf silently ignores these fields for
+// non-init packages (kind != ZarfInitConfig).
+message InitOptions {
+    string registry_address = 1;
+    int32 registry_node_port = 2;
+    string registry_secret = 3;
+    string registry_push_username = 4;
+    string registry_push_password = 5;
+    string registry_pull_username = 6;
+    string registry_pull_password = 7;
 }
 
 message DeployResponse {

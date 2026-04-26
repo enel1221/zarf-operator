@@ -68,18 +68,19 @@ import (
 
 // Finalizer
 const (
-	ZarfPackageFinalizer = "zarfpackage.zarf.dev/finalizer"
-	AnnotationRedeploy   = "zarf.dev/redeploy"
-	DefaultRequeueAfter  = 5 * time.Minute
-	registrySecretRefKey = "spec.registryCredentialSecretRef"
-	clusterSecretRefKey  = "spec.clusterSecretRef"
-	dependsOnRefKey      = "spec.dependsOnRef"
-	backoffBaseInterval  = 10 * time.Second
-	backoffMaxInterval   = 5 * time.Minute
-	backoffMultiplier    = 2.0
-	backoffMaxJitter     = 5 * time.Second
-	dependencyRequeue    = 10 * time.Second
-	sidecarBusyRequeue   = 10 * time.Second
+	ZarfPackageFinalizer        = "zarfpackage.zarf.dev/finalizer"
+	AnnotationRedeploy          = "zarf.dev/redeploy"
+	DefaultRequeueAfter         = 5 * time.Minute
+	registrySecretRefKey        = "spec.registryCredentialSecretRef"
+	clusterSecretRefKey         = "spec.clusterSecretRef"
+	initCredentialsSecretRefKey = "spec.initOptions.registryInfo.credentialsSecretRef"
+	dependsOnRefKey             = "spec.dependsOnRef"
+	backoffBaseInterval         = 10 * time.Second
+	backoffMaxInterval          = 5 * time.Minute
+	backoffMultiplier           = 2.0
+	backoffMaxJitter            = 5 * time.Second
+	dependencyRequeue           = 10 * time.Second
+	sidecarBusyRequeue          = 10 * time.Second
 )
 
 // Condition reasons
@@ -98,6 +99,7 @@ const (
 	ReasonRedeployRequested    = "RedeployRequested"
 	ReasonSecretNotFound       = "SecretNotFound"
 	ReasonInvalidClusterSecret = "InvalidClusterSecret"
+	ReasonInvalidInitSecret    = "InvalidInitSecret"
 	ReasonHelmDebugLogs        = "HelmDebugLogs"
 	ReasonStalled              = "Stalled"
 )
@@ -612,6 +614,12 @@ func (r *ZarfPackageReconciler) deploy(
 	}
 	opts.Kubeconfig = kubeconfig
 
+	initOpts, retry := r.resolveInitOptions(ctx, log, zarfPkg)
+	if retry != nil {
+		return *retry, nil
+	}
+	opts.InitOptions = initOpts
+
 	if wasFailed {
 		r.preDeployCleanup(ctx, log, zarfPkg, zarfClient)
 	}
@@ -806,6 +814,81 @@ func (r *ZarfPackageReconciler) resolveClusterKubeconfig(
 
 	log.Info("resolved cluster kubeconfig from secret", "secret", ref)
 	return kubeconfig, nil
+}
+
+// resolveInitOptions assembles zarf.InitOptions for an init-package deploy.
+// When spec.initOptions is unset, it returns (nil, nil) so the sidecar leaves
+// packager.DeployOptions.RegistryInfo at its zero value (in-cluster default).
+// When set, it optionally reads the referenced zarf-state Secret and overlays
+// spec-level Address/NodePort. On failure it updates status + records an event
+// and returns a non-nil *ctrl.Result so the caller requeues with backoff.
+func (r *ZarfPackageReconciler) resolveInitOptions(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+) (*zarf.InitOptions, *ctrl.Result) {
+	spec := zarfPkg.Spec.InitOptions
+	if spec == nil || spec.RegistryInfo == nil {
+		return nil, nil
+	}
+	reg := spec.RegistryInfo
+
+	out := &zarf.InitOptions{
+		RegistryAddress:  reg.Address,
+		RegistryNodePort: reg.NodePort,
+	}
+
+	if reg.CredentialsSecretRef != "" {
+		ref := reg.CredentialsSecretRef
+		var secret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: zarfPkg.Namespace, Name: ref}, &secret); err != nil {
+			log.Error(err, "failed to get init credentials secret", "secret", ref)
+			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+				ReasonSecretNotFound, fmt.Sprintf("Init credentials secret %q not found: %v", ref, err))
+			if r.recorder != nil {
+				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
+					fmt.Sprintf("Secret %q not found", ref))
+			}
+			r.recordFailure(zarfPkg)
+			r.recordFailureMetric(ReasonSecretNotFound)
+			result := ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}
+			return nil, &result
+		}
+
+		state, err := parseZarfStateSecret(&secret)
+		if err != nil {
+			log.Error(err, "failed to parse zarf-state secret", "secret", ref)
+			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+				ReasonInvalidInitSecret, fmt.Sprintf("Init credentials secret %q invalid: %v", ref, err))
+			if r.recorder != nil {
+				r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonInvalidInitSecret,
+					fmt.Sprintf("Secret %q invalid: %v", ref, err))
+			}
+			r.recordFailure(zarfPkg)
+			r.recordFailureMetric(ReasonInvalidInitSecret)
+			result := ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}
+			return nil, &result
+		}
+
+		// Secret-sourced values are the baseline; CR-level overrides win when set.
+		out.RegistrySecret = state.RegistryInfo.Secret
+		out.RegistryPushUsername = state.RegistryInfo.PushUsername
+		out.RegistryPushPassword = state.RegistryInfo.PushPassword
+		out.RegistryPullUsername = state.RegistryInfo.PullUsername
+		out.RegistryPullPassword = state.RegistryInfo.PullPassword
+		if out.RegistryAddress == "" {
+			out.RegistryAddress = state.RegistryInfo.Address
+		}
+		if out.RegistryNodePort == 0 {
+			out.RegistryNodePort = state.RegistryInfo.NodePort
+		}
+
+		log.Info("resolved init registry credentials from secret", "secret", ref)
+	}
+
+	return out, nil
 }
 
 func (r *ZarfPackageReconciler) handleDeletion(
@@ -1394,6 +1477,20 @@ func (r *ZarfPackageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return err
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &opsv1alpha1.ZarfPackage{}, initCredentialsSecretRefKey, func(raw client.Object) []string {
+		zarfPkg, ok := raw.(*opsv1alpha1.ZarfPackage)
+		if !ok {
+			return nil
+		}
+		if zarfPkg.Spec.InitOptions == nil ||
+			zarfPkg.Spec.InitOptions.RegistryInfo == nil ||
+			zarfPkg.Spec.InitOptions.RegistryInfo.CredentialsSecretRef == "" {
+			return nil
+		}
+		return []string{zarfPkg.Spec.InitOptions.RegistryInfo.CredentialsSecretRef}
+	}); err != nil {
+		return err
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &opsv1alpha1.ZarfPackage{}, dependsOnRefKey, func(raw client.Object) []string {
 		zarfPkg, ok := raw.(*opsv1alpha1.ZarfPackage)
 		if !ok || len(zarfPkg.Spec.DependsOn) == 0 {
@@ -1476,7 +1573,7 @@ func (r *ZarfPackageReconciler) requestsForReferencingSecret(ctx context.Context
 	}
 	seen := make(map[types.NamespacedName]struct{})
 	requests := make([]reconcile.Request, 0)
-	for _, key := range []string{registrySecretRefKey, clusterSecretRefKey} {
+	for _, key := range []string{registrySecretRefKey, clusterSecretRefKey, initCredentialsSecretRefKey} {
 		var list opsv1alpha1.ZarfPackageList
 		if err := r.List(ctx, &list, client.InNamespace(secret.Namespace), client.MatchingFields{key: secret.Name}); err != nil {
 			logf.FromContext(ctx).Error(err, "failed to map Secret to ZarfPackage list",

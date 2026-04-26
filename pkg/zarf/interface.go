@@ -30,6 +30,22 @@ type DeployOptions struct {
 	RegistryCredentialJSON  []byte
 	HelmDebugEnabled        bool
 	Kubeconfig              []byte
+	InitOptions             *InitOptions
+}
+
+// InitOptions carries init-package-specific deploy configuration — zarf
+// honors these only when the package's kind is ZarfInitConfig. A non-nil
+// InitOptions with a non-empty RegistryAddress triggers zarf's built-in
+// "skip in-cluster registry components" path (zarf-injector,
+// zarf-seed-registry, zarf-registry).
+type InitOptions struct {
+	RegistryAddress      string
+	RegistryNodePort     int32
+	RegistrySecret       string
+	RegistryPushUsername string
+	RegistryPushPassword string
+	RegistryPullUsername string
+	RegistryPullPassword string
 }
 
 // DeployResult contains the result of a deployment

@@ -363,3 +363,69 @@ func TestApplyKubeconfig_RestoresPreexistingEnv(t *testing.T) {
 		t.Errorf("KUBECONFIG not restored after cleanup: got %q want %q", got, original)
 	}
 }
+
+func TestBuildRegistryInfo(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         *zarfv1.InitOptions
+		wantAddr   string
+		wantPort   int
+		wantPushUN string
+		wantSecret string
+	}{
+		{
+			name:     "nil input yields zero value",
+			in:       nil,
+			wantAddr: "",
+			wantPort: 0,
+		},
+		{
+			name: "internal registry (nodePort-only)",
+			in: &zarfv1.InitOptions{
+				RegistryNodePort:     31999,
+				RegistrySecret:       "agent-signing-secret",
+				RegistryPushUsername: "zarf-push",
+				RegistryPushPassword: "pw1",
+				RegistryPullUsername: "zarf-pull",
+				RegistryPullPassword: "pw2",
+			},
+			wantAddr:   "",
+			wantPort:   31999,
+			wantPushUN: "zarf-push",
+			wantSecret: "agent-signing-secret",
+		},
+		{
+			name: "external registry (address + creds, no nodePort)",
+			in: &zarfv1.InitOptions{
+				RegistryAddress:      "registry.example.com",
+				RegistrySecret:       "agent-secret",
+				RegistryPushUsername: "write",
+				RegistryPushPassword: "pw-write",
+				RegistryPullUsername: "read",
+				RegistryPullPassword: "pw-read",
+			},
+			wantAddr:   "registry.example.com",
+			wantPort:   0,
+			wantPushUN: "write",
+			wantSecret: "agent-secret",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildRegistryInfo(tc.in)
+			if got.Address != tc.wantAddr {
+				t.Errorf("Address: got %q, want %q", got.Address, tc.wantAddr)
+			}
+			if got.NodePort != tc.wantPort {
+				t.Errorf("NodePort: got %d, want %d", got.NodePort, tc.wantPort)
+			}
+			if got.PushUsername != tc.wantPushUN {
+				t.Errorf("PushUsername: got %q, want %q", got.PushUsername, tc.wantPushUN)
+			}
+			if got.Secret != tc.wantSecret {
+				t.Errorf("Secret: got %q, want %q", got.Secret, tc.wantSecret)
+			}
+		})
+	}
+}
