@@ -272,31 +272,8 @@ func (r *ZarfPackageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 	}
 
-	dependenciesMet, notReadyDeps, depErr := r.checkDependencies(ctx, zarfPkg)
-	if depErr != nil {
-		return ctrl.Result{}, depErr
-	}
-	if !dependenciesMet {
-		message := fmt.Sprintf("Waiting for dependencies to be deployed: %s", strings.Join(notReadyDeps, ", "))
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDependenciesMet, metav1.ConditionFalse,
-			opsv1alpha1.ReasonDependenciesNotMet, message)
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-			opsv1alpha1.ReasonDependenciesNotMet, message)
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
-			opsv1alpha1.ReasonDependenciesNotMet, "Waiting for dependency readiness")
-		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
-		if r.recorder != nil {
-			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, opsv1alpha1.ReasonDependenciesNotMet, message)
-		}
-		return ctrl.Result{RequeueAfter: dependencyRequeue}, nil
-	}
-	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDependenciesMet, metav1.ConditionTrue,
-		opsv1alpha1.ReasonDependenciesMet, "All dependencies are deployed")
-
 	// Perform reconciliation
 	return r.reconcile(ctx, log, zarfPkg, zarfClient, original)
-
-	// return ctrl.Result{}, nil
 }
 
 func (r *ZarfPackageReconciler) reconcile(
@@ -308,14 +285,17 @@ func (r *ZarfPackageReconciler) reconcile(
 ) (ctrl.Result, error) {
 	// Check current deployment state only when package name is known.
 	var (
-		deployedPkg *zarf.PackageInfo
-		err         error
+		deployedPkg               *zarf.PackageInfo
+		err                       error
+		dependenciesChecked       bool
+		deployedLookupFailed      bool
+		preserveCurrentDeployment bool
 	)
-	kubeconfig, retry := r.resolveClusterKubeconfig(ctx, log, zarfPkg)
-	if retry != nil {
-		return *retry, nil
-	}
 	if strings.TrimSpace(zarfPkg.Status.PackageName) != "" {
+		kubeconfig, retry := r.resolveClusterKubeconfig(ctx, log, zarfPkg)
+		if retry != nil {
+			return *retry, nil
+		}
 		deployedPkg, err = zarfClient.GetDeployedPackage(ctx, zarf.GetDeployedPackageOptions{
 			PackageName: zarfPkg.Status.PackageName,
 			Kubeconfig:  kubeconfig,
@@ -326,16 +306,37 @@ func (r *ZarfPackageReconciler) reconcile(
 				log.V(1).Info("deployed package state not found", "package", zarfPkg.Status.PackageName)
 			} else {
 				log.Error(err, "failed to get deployed package state")
+				deployedLookupFailed = true
 			}
 		}
 	} else {
 		log.V(1).Info("skipping deployed state lookup because package name is not known yet")
+		dependenciesMet, notReadyDeps, depErr := r.checkDependencies(ctx, zarfPkg)
+		if depErr != nil {
+			return ctrl.Result{}, depErr
+		}
+		dependenciesChecked = true
+		if !dependenciesMet {
+			return r.waitForDependencies(zarfPkg, notReadyDeps, nil, false), nil
+		}
+		r.markDependenciesMet(zarfPkg)
 	}
 
 	// Determine if we need to deploy or update
 	needsDeploy := r.needsDeploy(ctx, zarfPkg, deployedPkg)
 
 	if needsDeploy {
+		if !dependenciesChecked {
+			dependenciesMet, notReadyDeps, depErr := r.checkDependencies(ctx, zarfPkg)
+			if depErr != nil {
+				return ctrl.Result{}, depErr
+			}
+			if !dependenciesMet {
+				preserveCurrentDeployment = deployedLookupFailed && zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseDeployed && !hasFailedStatusComponent(zarfPkg.Status.ComponentStatuses)
+				return r.waitForDependencies(zarfPkg, notReadyDeps, deployedPkg, preserveCurrentDeployment), nil
+			}
+			r.markDependenciesMet(zarfPkg)
+		}
 		return r.deploy(ctx, log, zarfPkg, zarfClient, original)
 	}
 
@@ -367,10 +368,8 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 	}
 
 	// Check for failed components that need retry
-	for _, comp := range deployedPkg.DeployedComponents {
-		if comp.Status == zarf.ComponentStatusFailed {
-			return true
-		}
+	if hasFailedDeployedComponent(deployedPkg) {
+		return true
 	}
 
 	// Check if deployment-affecting fields changed (not syncPolicy, logLevel, etc.)
@@ -412,6 +411,27 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 			}
 			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDriftDetected, metav1.ConditionFalse,
 				ReasonDriftResolved, "No drift detected")
+		}
+	}
+	return false
+}
+
+func hasFailedDeployedComponent(deployedPkg *zarf.PackageInfo) bool {
+	if deployedPkg == nil {
+		return false
+	}
+	for _, comp := range deployedPkg.DeployedComponents {
+		if comp.Status == zarf.ComponentStatusFailed {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFailedStatusComponent(componentStatuses []opsv1alpha1.ComponentStatus) bool {
+	for _, comp := range componentStatuses {
+		if comp.Status == string(zarf.ComponentStatusFailed) {
+			return true
 		}
 	}
 	return false
@@ -1400,6 +1420,48 @@ func parseSetVariables(set []string) map[string]string {
 		}
 	}
 	return result
+}
+
+func (r *ZarfPackageReconciler) markDependenciesMet(zarfPkg *opsv1alpha1.ZarfPackage) {
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDependenciesMet, metav1.ConditionTrue,
+		opsv1alpha1.ReasonDependenciesMet, "All dependencies are deployed")
+}
+
+func (r *ZarfPackageReconciler) waitForDependencies(
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	notReadyDeps []string,
+	deployedPkg *zarf.PackageInfo,
+	preserveCurrentDeployment bool,
+) ctrl.Result {
+	message := fmt.Sprintf("Waiting for dependencies to be deployed: %s", strings.Join(notReadyDeps, ", "))
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeDependenciesMet, metav1.ConditionFalse,
+		opsv1alpha1.ReasonDependenciesNotMet, message)
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
+		opsv1alpha1.ReasonDependenciesNotMet, "Waiting for dependency readiness")
+
+	if deployedPkg != nil && !hasFailedDeployedComponent(deployedPkg) {
+		r.syncStatusFromDeployed(zarfPkg, deployedPkg)
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
+			ReasonDeployed, "Current deployment remains ready while waiting for dependencies")
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
+			opsv1alpha1.ReasonDependenciesNotMet, message)
+	} else if preserveCurrentDeployment {
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
+			ReasonDeployed, "Current deployment remains ready while waiting for dependencies")
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
+			opsv1alpha1.ReasonDependenciesNotMet, message)
+	} else {
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+			opsv1alpha1.ReasonDependenciesNotMet, message)
+		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
+	}
+
+	if r.recorder != nil {
+		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, opsv1alpha1.ReasonDependenciesNotMet, message)
+	}
+	return ctrl.Result{RequeueAfter: dependencyRequeue}
 }
 
 func (r *ZarfPackageReconciler) checkDependencies(ctx context.Context, zarfPkg *opsv1alpha1.ZarfPackage) (bool, []string, error) {

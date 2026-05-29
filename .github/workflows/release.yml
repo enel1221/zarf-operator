@@ -60,7 +60,7 @@ jobs:
       - name: Wait for CI to complete
         uses: lewagon/wait-on-check-action@v1.3.4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           running-workflow-name: 'Create Release'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -72,7 +72,7 @@ jobs:
       - name: Setup Zarf
         uses: defenseunicorns/setup-zarf@main
         with:
-          version: v0.42.2
+          version: v0.62.0
 
       - name: Build install manifest
         run: |

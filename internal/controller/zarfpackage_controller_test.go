@@ -874,6 +874,295 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(deps.Reason).To(Equal(opsv1alpha1.ReasonDependenciesMet))
 		})
 
+		It("should keep an already deployed dependent deployed while a dependency is redeploying", func() {
+			dependencyNN := createResource("dep-redeploying", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-stays-deployed", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-redeploying"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Conditions = []metav1.Condition{
+				{
+					Type:               string(opsv1alpha1.ConditionTypeDependenciesMet),
+					Status:             metav1.ConditionTrue,
+					Reason:             opsv1alpha1.ReasonDependenciesMet,
+					Message:            "All dependencies are deployed",
+					ObservedGeneration: obj.Generation,
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{
+					Name:       testPackageName,
+					Version:    "v1",
+					Generation: 1,
+					DeployedComponents: []zarf.DeployedComponent{
+						{Name: "comp1", Status: zarf.ComponentStatusSucceeded},
+					},
+				}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should keep an already deployed dependent deployed when a dependency is missing", func() {
+			nn := createResource("dependent-missing-dep-stays-deployed", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "missing-after-deploy"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: "v1", Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should keep an already deployed dependent deployed when deployed lookup is transiently unavailable", func() {
+			dependencyNN := createResource("dep-transient-lookup-unready", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-transient-lookup", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-transient-lookup-unready"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.ComponentStatuses = []opsv1alpha1.ComponentStatus{{Name: "comp1", Status: string(zarf.ComponentStatusSucceeded)}}
+			obj.Status.Conditions = []metav1.Condition{
+				{
+					Type:               string(opsv1alpha1.ConditionTypeReady),
+					Status:             metav1.ConditionTrue,
+					Reason:             ReasonDeployed,
+					Message:            "Package deployed successfully",
+					ObservedGeneration: obj.Generation,
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, status.Error(codes.Unavailable, "lookup temporarily unavailable")).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+			progressing := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should keep the current deployment deployed when a redeploy is blocked by dependencies", func() {
+			dependencyNN := createResource("dep-blocks-redeploy", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-redeploy-waits-deployed", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-blocks-redeploy"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			oldHash := obj.Spec.DeploymentHash()
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.DeployedSpecHash = oldHash
+			obj.Status.Conditions = []metav1.Condition{
+				{
+					Type:               string(opsv1alpha1.ConditionTypeReady),
+					Status:             metav1.ConditionTrue,
+					Reason:             ReasonDeployed,
+					Message:            "Package deployed successfully",
+					ObservedGeneration: obj.Generation,
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Spec.Source = "oci://example.com/pkg:v2"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: "v1", Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v2", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseDeployed))
+			Expect(updated.Status.DeployedSpecHash).To(Equal(oldHash))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+			progressing := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should move back to pending when deployed state is gone and dependencies are not ready", func() {
+			dependencyNN := createResource("dep-state-missing-unready", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-state-missing", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-state-missing-unready"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 1}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhasePending))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+		})
+
+		It("should keep failed deployed components pending until dependencies are ready", func() {
+			dependencyNN := createResource("dep-failed-component-unready", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-failed-component-waits", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-failed-component-unready"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{
+					Name:       testPackageName,
+					Version:    "v1",
+					Generation: 1,
+					DeployedComponents: []zarf.DeployedComponent{
+						{Name: "comp1", Status: zarf.ComponentStatusFailed},
+					},
+				}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhasePending))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+		})
+
 		It("should deploy immediately when no dependencies are declared", func() {
 			nn := createResource("dependent-no-deps", true, "oci://example.com/pkg:v1")
 
