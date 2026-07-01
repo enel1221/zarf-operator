@@ -25,6 +25,8 @@ import (
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
 )
 
+const registryV2Path = "/v2/"
+
 func TestClassifyOCIError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -178,6 +180,7 @@ func TestDeployFailsWhenPostDeployImageVerificationFails(t *testing.T) {
 	}
 	if detail == nil {
 		t.Fatalf("expected DeployErrorDetail in verification failure")
+		return
 	}
 	if detail.FailedComponent != "crossplane-functions" {
 		t.Fatalf("FailedComponent = %q, want crossplane-functions", detail.FailedComponent)
@@ -244,6 +247,7 @@ func TestDeployReportsActualFailedImageComponent(t *testing.T) {
 	}
 	if detail == nil {
 		t.Fatalf("expected DeployErrorDetail in verification failure")
+		return
 	}
 	if detail.FailedComponent != "schema-server" {
 		t.Fatalf("FailedComponent = %q, want schema-server", detail.FailedComponent)
@@ -318,18 +322,7 @@ func TestExpectedDeployedImageRefsSkipsExternalInitBootstrapImages(t *testing.T)
 }
 
 func TestResolveRegistryImageFailsWhenTargetRegistryLacksImage(t *testing.T) {
-	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		if r.URL.Path == "/v2/" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if strings.Contains(r.URL.Path, "/manifests/") {
-			http.NotFound(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}))
+	registry := httptest.NewServer(http.HandlerFunc(missingImageRegistryHandler))
 	defer registry.Close()
 
 	ref := strings.TrimPrefix(registry.URL, "http://") + "/internal/jade-crossplane/schema-server:2.5.0"
@@ -345,18 +338,7 @@ func TestResolveRegistryImageFailsWhenTargetRegistryLacksImage(t *testing.T) {
 }
 
 func TestResolveRegistryImageProbesLocalHTTPSBeforePlainHTTP(t *testing.T) {
-	registry := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		if r.URL.Path == "/v2/" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if strings.Contains(r.URL.Path, "/manifests/") {
-			http.NotFound(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}))
+	registry := httptest.NewTLSServer(http.HandlerFunc(missingImageRegistryHandler))
 	defer registry.Close()
 
 	ref := strings.TrimPrefix(registry.URL, "https://") + "/internal/jade-crossplane/schema-server:2.5.0"
@@ -375,7 +357,7 @@ func TestResolveRegistryImageUsesPullCredentials(t *testing.T) {
 	authSeen := false
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		if r.URL.Path == "/v2/" {
+		if r.URL.Path == registryV2Path {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -414,6 +396,19 @@ func TestResolveRegistryImageUsesPullCredentials(t *testing.T) {
 	if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") {
 		t.Fatalf("expected credentials to be accepted before missing image error, got %v", err)
 	}
+}
+
+func missingImageRegistryHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+	if r.URL.Path == registryV2Path {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/manifests/") {
+		http.NotFound(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func TestResolveRegistryImageTimesOutWaitingForHeaders(t *testing.T) {
@@ -455,7 +450,7 @@ func TestVerifyDeployedPackageImagesAgainstK3DExternalRegistryMissingImage(t *te
 
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		if r.URL.Path == "/v2/" {
+		if r.URL.Path == registryV2Path {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

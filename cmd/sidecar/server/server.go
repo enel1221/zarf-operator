@@ -282,50 +282,11 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		"ociConcurrency", req.OciConcurrency,
 	)
 
-	// Inject per-request registry credentials if provided.
-	// Writes a temp Docker config so Zarf's ORAS layer picks it up via $DOCKER_CONFIG.
-	if len(req.RegistryCredentialJson) > 0 {
-		tmpDir, err := os.MkdirTemp("", "zarf-docker-config-*")
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to create temp docker config dir: %v", err)
-		}
-		defer func() {
-			if err := os.RemoveAll(tmpDir); err != nil {
-				log.Warn("failed to remove temp docker config dir", "error", err)
-			}
-		}()
-
-		if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), req.RegistryCredentialJson, 0600); err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to write temp docker config: %v", err)
-		}
-
-		origDockerConfig, hadEnv := os.LookupEnv("DOCKER_CONFIG")
-		if err := os.Setenv("DOCKER_CONFIG", tmpDir); err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to set DOCKER_CONFIG: %v", err)
-		}
-		defer func() {
-			if hadEnv {
-				_ = os.Setenv("DOCKER_CONFIG", origDockerConfig)
-			} else {
-				_ = os.Unsetenv("DOCKER_CONFIG")
-			}
-		}()
-		// Log which registries have credentials configured (for debugging, never log the actual creds)
-		var dockerCfg struct {
-			Auths map[string]json.RawMessage `json:"auths"`
-		}
-		if err := json.Unmarshal(req.RegistryCredentialJson, &dockerCfg); err == nil && len(dockerCfg.Auths) > 0 {
-			hosts := make([]string, 0, len(dockerCfg.Auths))
-			for h := range dockerCfg.Auths {
-				hosts = append(hosts, h)
-			}
-			log.Info("configured registry credentials from secret", "dockerConfigDir", tmpDir, "registryHosts", hosts)
-		} else {
-			log.Warn("registry credential JSON provided but no auths entries found", "dockerConfigDir", tmpDir)
-		}
-	} else {
-		log.Debug("no registry credentials provided, using default credential resolution")
+	registryCleanup, err := applyRegistryCredentials(log, req.RegistryCredentialJson)
+	if err != nil {
+		return nil, err
 	}
+	defer registryCleanup()
 
 	// Load the package
 	loadOpts := packager.LoadOptions{
@@ -465,6 +426,61 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		DeployedComponents: components,
 		DeployLogs:         capture.Lines(),
 	}, nil
+}
+
+func applyRegistryCredentials(log *slog.Logger, credentialJSON []byte) (func(), error) {
+	if len(credentialJSON) == 0 {
+		log.Debug("no registry credentials provided, using default credential resolution")
+		return func() {}, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "zarf-docker-config-*")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to create temp docker config dir: %v", err)
+	}
+	cleanupDir := true
+	defer func() {
+		if cleanupDir {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), credentialJSON, 0600); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to write temp docker config: %v", err)
+	}
+
+	origDockerConfig, hadEnv := os.LookupEnv("DOCKER_CONFIG")
+	if err := os.Setenv("DOCKER_CONFIG", tmpDir); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to set DOCKER_CONFIG: %v", err)
+	}
+
+	logConfiguredRegistryHosts(log, tmpDir, credentialJSON)
+	cleanupDir = false
+	return func() {
+		if hadEnv {
+			_ = os.Setenv("DOCKER_CONFIG", origDockerConfig)
+		} else {
+			_ = os.Unsetenv("DOCKER_CONFIG")
+		}
+		if err := os.RemoveAll(tmpDir); err != nil {
+			log.Warn("failed to remove temp docker config dir", "error", err)
+		}
+	}, nil
+}
+
+func logConfiguredRegistryHosts(log *slog.Logger, dockerConfigDir string, credentialJSON []byte) {
+	var dockerCfg struct {
+		Auths map[string]json.RawMessage `json:"auths"`
+	}
+	if err := json.Unmarshal(credentialJSON, &dockerCfg); err == nil && len(dockerCfg.Auths) > 0 {
+		hosts := make([]string, 0, len(dockerCfg.Auths))
+		for h := range dockerCfg.Auths {
+			hosts = append(hosts, h)
+		}
+		log.Info("configured registry credentials from secret", "dockerConfigDir", dockerConfigDir, "registryHosts", hosts)
+		return
+	}
+	log.Warn("registry credential JSON provided but no auths entries found", "dockerConfigDir", dockerConfigDir)
 }
 
 func (s *ZarfServer) GetDeployedPackage(

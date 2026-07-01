@@ -139,6 +139,7 @@ func TestNormalizeKubeconfigSecret_ArgoStyle_BearerToken(t *testing.T) {
 	user := cfg.AuthInfos["creds-user"]
 	if user == nil {
 		t.Fatalf("expected 'creds-user' authinfo; got: %v", keysOfAuth(cfg.AuthInfos))
+		return
 	}
 	if user.Token != "tok-123" {
 		t.Errorf("expected bearer token, got %q", user.Token)

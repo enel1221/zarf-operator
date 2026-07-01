@@ -702,16 +702,7 @@ func (r *ZarfPackageReconciler) deploy(
 		r.preDeployCleanup(ctx, log, zarfPkg, zarfClient)
 	}
 
-	deployCtx, cancel := context.WithTimeout(ctx, timeout+time.Minute)
-	defer cancel()
-
-	result, err := zarfClient.Deploy(deployCtx, opts)
-	if err != nil {
-		result, err = r.retryDeployAfterHelmRecovery(ctx, log, zarfPkg, zarfClient, opts, timeout, err)
-	}
-	if err == nil {
-		err = failedDeployResultError(result)
-	}
+	result, err := r.deployPackage(ctx, log, zarfPkg, zarfClient, opts, timeout)
 	if err != nil {
 		if status.Code(err) == codes.ResourceExhausted {
 			log.Info("sidecar busy with another operation, retrying deploy", "requeueAfter", sidecarBusyRequeue)
@@ -801,6 +792,27 @@ func (r *ZarfPackageReconciler) deploy(
 	}
 
 	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+}
+
+func (r *ZarfPackageReconciler) deployPackage(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	zarfClient zarf.Client,
+	opts zarf.DeployOptions,
+	timeout time.Duration,
+) (*zarf.DeployResult, error) {
+	deployCtx, cancel := context.WithTimeout(ctx, timeout+time.Minute)
+	defer cancel()
+
+	result, err := zarfClient.Deploy(deployCtx, opts)
+	if err != nil {
+		result, err = r.retryDeployAfterHelmRecovery(ctx, log, zarfPkg, zarfClient, opts, timeout, err)
+	}
+	if err == nil {
+		err = failedDeployResultError(result)
+	}
+	return result, err
 }
 
 func (r *ZarfPackageReconciler) resolveRegistryCredentials(

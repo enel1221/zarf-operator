@@ -50,7 +50,11 @@ func (e *imageVerificationError) Unwrap() error {
 	return e.err
 }
 
-func verifyDeployedPackageImages(ctx context.Context, pkgLayout *layout.PackageLayout, opts packager.DeployOptions) error {
+func verifyDeployedPackageImages(
+	ctx context.Context,
+	pkgLayout *layout.PackageLayout,
+	opts packager.DeployOptions,
+) error {
 	if pkgLayout == nil || pkgLayout.Pkg.Metadata.YOLO || !pkgLayout.Pkg.HasImages() {
 		return nil
 	}
@@ -118,7 +122,10 @@ func registryInfoForImageVerification(
 		return opts.RegistryInfo, clusterClient, nil
 	}
 	if stateErr != nil {
-		return state.RegistryInfo{}, clusterClient, fmt.Errorf("load zarf state for target registry verification: %w", stateErr)
+		return state.RegistryInfo{}, clusterClient, fmt.Errorf(
+			"load zarf state for target registry verification: %w",
+			stateErr,
+		)
 	}
 	return state.RegistryInfo{}, clusterClient, fmt.Errorf("zarf state did not include target registry information")
 }
@@ -158,7 +165,11 @@ func expectedDeployedImageRefs(
 	return refs, nil
 }
 
-func skipImageVerificationForComponent(pkgLayout *layout.PackageLayout, componentName string, registryInfo state.RegistryInfo) bool {
+func skipImageVerificationForComponent(
+	pkgLayout *layout.PackageLayout,
+	componentName string,
+	registryInfo state.RegistryInfo,
+) bool {
 	if !pkgLayout.Pkg.IsInitConfig() {
 		return false
 	}
@@ -227,7 +238,9 @@ func registryResolveHTTPClient(opts packager.DeployOptions) (*http.Client, error
 		return nil, fmt.Errorf("default transport is not an *http.Transport")
 	}
 	transport = transport.Clone()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: opts.RemoteOptions.InsecureSkipTLSVerify} //nolint:gosec // user-requested registry mode.
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: opts.RemoteOptions.InsecureSkipTLSVerify, //nolint:gosec // User-requested mode.
+	}
 	transport.ResponseHeaderTimeout = registryResolveResponseHeaderTimeout
 	return &http.Client{Transport: retry.NewTransport(transport)}, nil
 }
