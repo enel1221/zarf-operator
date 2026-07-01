@@ -11,6 +11,16 @@ spec:
 
   # Optional: Sync policy for the package Default=Ignore (Ignore, Detect, Remediate)
   syncPolicy: Detect
+
+  # Optional: Poll the source OCI repository for newer stable semver tags.
+  # The operator keeps spec.source unchanged and records the deployed upgrade
+  # source in status.source.
+  # upgradePolicy:
+  #   enabled: true
+  #   strategy: SemVer
+  #   interval: 5m
+  #   semverConstraint: ">=1.0.0 <2.0.0"
+
   # Optional: List of components to deploy (if empty, deploys all required components)
   components:
     - flux

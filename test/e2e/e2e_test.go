@@ -17,8 +17,13 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +34,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/enel1221/zarf-operator/test/utils"
+	"sigs.k8s.io/yaml"
 )
 
 // namespace where the operator is deployed
@@ -42,6 +48,195 @@ const metricsServiceName = "zarf-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName for RBAC to allow metrics access
 const metricsRoleBindingName = "zarf-operator-metrics-binding"
+
+type registryCredentials struct {
+	username string
+	password string
+}
+
+func uniqueAutoUpgradeRepo(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+func publishAutoUpgradePackage(pkgDir, repoName, hostURL string, credentials *registryCredentials) {
+	tmpDir, err := os.MkdirTemp("", "zarf-e2e-auto-upgrade-*")
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		Expect(os.RemoveAll(tmpDir)).To(Succeed())
+	}()
+
+	stagedDir := filepath.Join(tmpDir, "src")
+	Expect(copyDir(pkgDir, stagedDir)).To(Succeed())
+	Expect(rewriteZarfPackageName(filepath.Join(stagedDir, "zarf.yaml"), repoName)).To(Succeed())
+
+	outputDir := filepath.Join(tmpDir, "pkg")
+	Expect(os.MkdirAll(outputDir, 0o755)).To(Succeed())
+
+	cmd := exec.Command("zarf", "package", "create", stagedDir, "--confirm", "--output", outputDir)
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "failed to create package from %s", pkgDir)
+
+	matches, err := filepath.Glob(filepath.Join(outputDir, fmt.Sprintf("zarf-package-%s-*.tar.zst", repoName)))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(matches).To(HaveLen(1), "expected one built auto-upgrade package for %s in %s", repoName, outputDir)
+
+	publishArgs := []string{"package", "publish", matches[0], fmt.Sprintf("oci://%s", hostURL), "--plain-http"}
+	if credentials != nil {
+		dockerConfigDir := writeDockerConfig(tmpDir, hostURL, *credentials)
+		cmd = exec.Command("env", append([]string{"DOCKER_CONFIG=" + dockerConfigDir, "zarf"}, publishArgs...)...)
+	} else {
+		cmd = exec.Command("zarf", publishArgs...)
+	}
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "failed to publish package %s", matches[0])
+}
+
+func copyDir(srcDir, dstDir string) error {
+	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(dstDir, relPath)
+
+		if entry.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported non-regular fixture file %s", path)
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, content, info.Mode().Perm())
+	})
+}
+
+func rewriteZarfPackageName(zarfPath, repoName string) error {
+	content, err := os.ReadFile(zarfPath)
+	if err != nil {
+		return err
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(content, &config); err != nil {
+		return err
+	}
+
+	metadata, ok := config["metadata"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("zarf package config %s missing metadata map", zarfPath)
+	}
+	metadata["name"] = repoName
+
+	rewritten, err := yaml.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(zarfPath, rewritten, 0o644)
+}
+
+func dockerConfigSecretManifest(name, namespace, server string, credentials registryCredentials) string {
+	encodedDockerConfig := base64.StdEncoding.EncodeToString(dockerConfigJSON(server, credentials))
+	return fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: %s
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: %s
+`, name, namespace, encodedDockerConfig)
+}
+
+func writeDockerConfig(parentDir, server string, credentials registryCredentials) string {
+	dockerConfigDir := filepath.Join(parentDir, "docker")
+	Expect(os.MkdirAll(dockerConfigDir, 0o700)).To(Succeed())
+	configPath := filepath.Join(dockerConfigDir, "config.json")
+	Expect(os.WriteFile(configPath, dockerConfigJSON(server, credentials), 0o600)).To(Succeed())
+	return dockerConfigDir
+}
+
+func dockerConfigJSON(server string, credentials registryCredentials) []byte {
+	auth := base64.StdEncoding.EncodeToString([]byte(credentials.username + ":" + credentials.password))
+	config := struct {
+		Auths map[string]map[string]string `json:"auths"`
+	}{
+		Auths: map[string]map[string]string{
+			server: {
+				"auth": auth,
+			},
+		},
+	}
+
+	content, err := json.Marshal(config)
+	Expect(err).NotTo(HaveOccurred())
+	return content
+}
+
+func aliasRegistryTag(hostURL, repoName, sourceTag, aliasTag string, credentials *registryCredentials) {
+	client := http.Client{Timeout: 30 * time.Second}
+	manifestURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", hostURL, repoName, sourceTag)
+
+	getReq, err := http.NewRequest(http.MethodGet, manifestURL, nil)
+	Expect(err).NotTo(HaveOccurred())
+	prepareRegistryManifestRequest(getReq, credentials)
+
+	getResp, err := client.Do(getReq)
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		Expect(getResp.Body.Close()).To(Succeed())
+	}()
+
+	manifest, err := io.ReadAll(getResp.Body)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(getResp.StatusCode).To(BeNumerically(">=", 200), "registry GET %s failed: %s", manifestURL, string(manifest))
+	Expect(getResp.StatusCode).To(BeNumerically("<", 300), "registry GET %s failed: %s", manifestURL, string(manifest))
+
+	contentType := getResp.Header.Get("Content-Type")
+	Expect(contentType).NotTo(BeEmpty(), "registry manifest response should include Content-Type")
+
+	putURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", hostURL, repoName, aliasTag)
+	putReq, err := http.NewRequest(http.MethodPut, putURL, bytes.NewReader(manifest))
+	Expect(err).NotTo(HaveOccurred())
+	prepareRegistryManifestRequest(putReq, credentials)
+	putReq.Header.Set("Content-Type", contentType)
+
+	putResp, err := client.Do(putReq)
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		Expect(putResp.Body.Close()).To(Succeed())
+	}()
+
+	responseBody, err := io.ReadAll(putResp.Body)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(putResp.StatusCode).To(BeNumerically(">=", 200), "registry PUT %s failed: %s", putURL, string(responseBody))
+	Expect(putResp.StatusCode).To(BeNumerically("<", 300), "registry PUT %s failed: %s", putURL, string(responseBody))
+}
+
+func prepareRegistryManifestRequest(req *http.Request, credentials *registryCredentials) {
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+	}, ", "))
+	if credentials != nil {
+		req.SetBasicAuth(credentials.username, credentials.password)
+	}
+}
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -1469,6 +1664,8 @@ spec:
 			dependentPkgName  = "e2e-update-dependent"
 			independentA      = "e2e-update-independent-a"
 			independentB      = "e2e-update-independent-b"
+			autoUpgradePkg    = "e2e-auto-upgrade"
+			autoUpgradeNs     = "e2e-auto-upgrade"
 		)
 
 		applyYAML := func(yaml string) {
@@ -1489,6 +1686,10 @@ spec:
 			}, 10*time.Minute, 2*time.Second).Should(Succeed())
 		}
 
+		publishPackage := func(pkgDir, repoName string) {
+			publishAutoUpgradePackage(pkgDir, repoName, registryHostURL, nil)
+		}
+
 		AfterEach(func() {
 			// Strip finalizers so CRs delete immediately without waiting for sidecar Remove.
 			// This prevents stale Helm releases when Remove can't acquire the lock.
@@ -1500,6 +1701,7 @@ spec:
 				dependentPkgName,
 				independentA,
 				independentB,
+				autoUpgradePkg,
 			} {
 				cmd := exec.Command("kubectl", "patch", "zarfpackage", name,
 					"-n", updateNamespace, "--type=json",
@@ -1515,6 +1717,7 @@ spec:
 				dependentPkgName,
 				independentA,
 				independentB,
+				autoUpgradePkg,
 			} {
 				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
 					"-n", updateNamespace, "--ignore-not-found=true", "--timeout=30s")
@@ -1528,11 +1731,119 @@ spec:
 			cmd := exec.Command("sh", "-c", helmClean)
 			_, _ = utils.Run(cmd)
 
-			for _, ns := range []string{nginxTargetNs, httpbinTargetNs} {
+			for _, ns := range []string{nginxTargetNs, httpbinTargetNs, autoUpgradeNs} {
 				cmd := exec.Command("kubectl", "delete", "ns", ns,
 					"--ignore-not-found=true", "--timeout=60s")
 				_, _ = utils.Run(cmd)
 			}
+		})
+
+		It("should automatically deploy a newer semver OCI tag after it is published", func() {
+			autoUpgradeRepo := uniqueAutoUpgradeRepo("e2e-auto-upgrade")
+
+			By("publishing the initial 1.0.0 package")
+			publishPackage(filepath.Join("test", "e2e", "testdata", "packages", "auto-upgrade-v1"), autoUpgradeRepo)
+
+			By("applying a ZarfPackage with SemVer auto-upgrades enabled")
+			initialSource := fmt.Sprintf("oci://%s/%s:1.0.0", registryURL, autoUpgradeRepo)
+			applyYAML(fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "%s"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  upgradePolicy:
+    enabled: true
+    strategy: SemVer
+    interval: 1h
+`, autoUpgradePkg, updateNamespace, initialSource))
+
+			waitForDeployed(autoUpgradePkg)
+
+			By("verifying version 1.0.0 is deployed before the newer tag exists")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "auto-upgrade-version",
+					"-n", autoUpgradeNs,
+					"-o", "jsonpath={.data.version}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1.0.0"))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			cmd := exec.Command("kubectl", "get", "zarfpackage", autoUpgradePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.deployedVersion}")
+			version, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(version).To(Equal("1.0.0"))
+
+			By("publishing version 1.0.1 to the same OCI registry")
+			publishPackage(filepath.Join("test", "e2e", "testdata", "packages", "auto-upgrade-v101"), autoUpgradeRepo)
+
+			By("creating a latest tag that should be ignored by SemVer discovery")
+			aliasRegistryTag(registryHostURL, autoUpgradeRepo, "1.0.1", "latest", nil)
+
+			By("publishing version 1.1.0 to the same OCI registry")
+			publishPackage(filepath.Join("test", "e2e", "testdata", "packages", "auto-upgrade-v110"), autoUpgradeRepo)
+
+			By("triggering an upgrade check after all candidate tags exist")
+			cmd = exec.Command("kubectl", "patch", "zarfpackage", autoUpgradePkg,
+				"-n", updateNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"upgradePolicy":{"interval":"1m"}}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the operator to discover and deploy the highest valid semver tag")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", autoUpgradePkg,
+					"-n", updateNamespace,
+					"-o", "jsonpath={.status.deployedVersion}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1.1.0"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", autoUpgradePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.spec.source}")
+			specSource, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(specSource).To(Equal(initialSource))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", autoUpgradePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.source}")
+			statusSource, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusSource).To(Equal(fmt.Sprintf("oci://%s/%s:1.1.0", registryURL, autoUpgradeRepo)))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", autoUpgradePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.availableVersion}:{.status.availableSource}")
+			available, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(available).To(Equal(":"))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", autoUpgradePkg,
+				"-n", updateNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='UpgradeAvailable')].status}")
+			upgradeAvailableStatus, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(upgradeAvailableStatus).To(Equal("False"))
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "auto-upgrade-version",
+					"-n", autoUpgradeNs,
+					"-o", "jsonpath={.data.version}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1.1.0"))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
 		It("should redeploy on source version update and refresh status conditions", func() {
@@ -1789,14 +2100,16 @@ spec:
 
 	Context("Registry Authentication", func() {
 		const (
-			authPkgNamespace = "default"
-			authTargetNs     = "e2e-test-nginx"
-			authSecretName   = "e2e-auth-registry-cred"
+			authPkgNamespace    = "default"
+			authTargetNs        = "e2e-test-nginx"
+			authAutoUpgradeName = "e2e-auth-auto-upgrade"
+			authAutoUpgradeNs   = "e2e-auto-upgrade"
+			authSecretName      = "e2e-auth-registry-cred"
 		)
 
 		AfterEach(func() {
 			By("cleaning up registry auth test resources")
-			for _, name := range []string{"e2e-auth-deploy", "e2e-auth-nosecret", "e2e-auth-nocreds"} {
+			for _, name := range []string{"e2e-auth-deploy", "e2e-auth-nosecret", "e2e-auth-nocreds", authAutoUpgradeName} {
 				cmd := exec.Command("kubectl", "delete", "zarfpackage", name,
 					"-n", authPkgNamespace, "--ignore-not-found=true", "--timeout=120s")
 				_, _ = utils.Run(cmd)
@@ -1804,20 +2117,35 @@ spec:
 			cmd := exec.Command("kubectl", "delete", "secret", authSecretName,
 				"-n", authPkgNamespace, "--ignore-not-found=true")
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "ns", authTargetNs,
-				"--ignore-not-found=true", "--timeout=60s")
-			_, _ = utils.Run(cmd)
+			for _, ns := range []string{authTargetNs, authAutoUpgradeNs} {
+				cmd = exec.Command("kubectl", "delete", "ns", ns,
+					"--ignore-not-found=true", "--timeout=60s")
+				_, _ = utils.Run(cmd)
+			}
 		})
+
+		createAuthRegistrySecret := func() {
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(dockerConfigSecretManifest(
+				authSecretName,
+				authPkgNamespace,
+				authRegistryURL,
+				registryCredentials{username: "testuser", password: "testpass"},
+			))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create auth secret")
+		}
+
+		publishAuthPackage := func(pkgDir, repoName string) {
+			publishAutoUpgradePackage(pkgDir, repoName, authRegistryHostURL, &registryCredentials{
+				username: "testuser",
+				password: "testpass",
+			})
+		}
 
 		It("should deploy from an auth-protected registry with valid credentials", func() {
 			By("creating a dockerconfigjson Secret with valid credentials")
-			cmd := exec.Command("kubectl", "create", "secret", "docker-registry", authSecretName,
-				"--docker-server="+authRegistryURL,
-				"--docker-username=testuser",
-				"--docker-password=testpass",
-				"-n", authPkgNamespace)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create auth secret")
+			createAuthRegistrySecret()
 
 			By("applying a ZarfPackage CR with registryCredentialSecretRef")
 			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
@@ -1833,9 +2161,9 @@ spec:
   registryCredentialSecretRef: %s
 `, authPkgNamespace, authRegistryURL, authSecretName)
 
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = utils.StringReader(zarfPkgYAML)
-			_, err = utils.Run(cmd)
+			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("verifying the ZarfPackage reaches Deployed phase")
@@ -1867,6 +2195,101 @@ spec:
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("True"))
+		})
+
+		It("should automatically upgrade from an auth-protected registry with valid credentials", func() {
+			authAutoUpgradeRepo := uniqueAutoUpgradeRepo("e2e-auth-auto-upgrade")
+			authCredentials := &registryCredentials{username: "testuser", password: "testpass"}
+
+			By("creating a dockerconfigjson Secret with valid credentials")
+			createAuthRegistrySecret()
+
+			By("publishing the initial 1.0.0 package to the auth registry")
+			publishAuthPackage(filepath.Join("test", "e2e", "testdata", "packages", "auto-upgrade-v1"), authAutoUpgradeRepo)
+
+			By("applying a ZarfPackage with SemVer auto-upgrades enabled")
+			initialSource := fmt.Sprintf("oci://%s/%s:1.0.0", authRegistryURL, authAutoUpgradeRepo)
+			zarfPkgYAML := fmt.Sprintf(`apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source: "%s"
+  plainHTTP: true
+  yolo: true
+  skipSignatureValidation: true
+  registryCredentialSecretRef: %s
+  upgradePolicy:
+    enabled: true
+    strategy: SemVer
+    interval: 1h
+`, authAutoUpgradeName, authPkgNamespace, initialSource, authSecretName)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = utils.StringReader(zarfPkgYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying version 1.0.0 is deployed before the newer tag exists")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "auto-upgrade-version",
+					"-n", authAutoUpgradeNs,
+					"-o", "jsonpath={.data.version}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1.0.0"))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("publishing version 1.0.1 to the same auth registry")
+			publishAuthPackage(filepath.Join("test", "e2e", "testdata", "packages", "auto-upgrade-v101"), authAutoUpgradeRepo)
+
+			By("creating a latest tag that should be ignored by SemVer discovery")
+			aliasRegistryTag(authRegistryHostURL, authAutoUpgradeRepo, "1.0.1", "latest", authCredentials)
+
+			By("publishing version 1.1.0 to the same auth registry")
+			publishAuthPackage(filepath.Join("test", "e2e", "testdata", "packages", "auto-upgrade-v110"), authAutoUpgradeRepo)
+
+			By("triggering an upgrade check after all candidate tags exist")
+			cmd = exec.Command("kubectl", "patch", "zarfpackage", authAutoUpgradeName,
+				"-n", authPkgNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"upgradePolicy":{"interval":"1m"}}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the operator to discover and deploy the highest valid semver tag using the registry secret")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "zarfpackage", authAutoUpgradeName,
+					"-n", authPkgNamespace,
+					"-o", "jsonpath={.status.deployedVersion}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1.1.0"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", authAutoUpgradeName,
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.spec.source}")
+			specSource, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(specSource).To(Equal(initialSource))
+
+			cmd = exec.Command("kubectl", "get", "zarfpackage", authAutoUpgradeName,
+				"-n", authPkgNamespace,
+				"-o", "jsonpath={.status.source}")
+			statusSource, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusSource).To(Equal(fmt.Sprintf("oci://%s/%s:1.1.0", authRegistryURL, authAutoUpgradeRepo)))
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "auto-upgrade-version",
+					"-n", authAutoUpgradeNs,
+					"-o", "jsonpath={.data.version}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1.1.0"))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
 		It("should fail with SecretNotFound when the referenced Secret does not exist", func() {

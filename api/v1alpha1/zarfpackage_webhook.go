@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -36,6 +37,8 @@ import (
 
 var _ webhook.CustomDefaulter = &zarfPackageCustomDefaulter{}
 var _ webhook.CustomValidator = &zarfPackageCustomValidator{}
+
+const minimumUpgradePolicyInterval = time.Minute
 
 func (r *ZarfPackage) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
@@ -64,6 +67,9 @@ func (d *zarfPackageCustomDefaulter) Default(_ context.Context, obj runtime.Obje
 	}
 	if pkg.Spec.OciConcurrency == 0 {
 		pkg.Spec.OciConcurrency = 6
+	}
+	if pkg.Spec.UpgradePolicy != nil && pkg.Spec.UpgradePolicy.Enabled && pkg.Spec.UpgradePolicy.Strategy == "" {
+		pkg.Spec.UpgradePolicy.Strategy = UpgradeStrategySemVer
 	}
 
 	return nil
@@ -172,5 +178,115 @@ func validateZarfPackageSpec(pkg *ZarfPackage) field.ErrorList {
 		}
 	}
 
+	allErrs = append(allErrs, validateUpgradePolicy(pkg)...)
+
 	return allErrs
+}
+
+func validateUpgradePolicy(pkg *ZarfPackage) field.ErrorList {
+	var allErrs field.ErrorList
+	policy := pkg.Spec.UpgradePolicy
+	if policy == nil {
+		return allErrs
+	}
+
+	path := field.NewPath("spec", "upgradePolicy")
+	strategy := policy.Strategy
+	if strategy == "" {
+		strategy = UpgradeStrategySemVer
+	}
+	if strategy != UpgradeStrategySemVer {
+		allErrs = append(allErrs, field.NotSupported(
+			path.Child("strategy"),
+			policy.Strategy,
+			[]string{string(UpgradeStrategySemVer)},
+		))
+	}
+
+	if policy.Interval != "" {
+		interval, err := time.ParseDuration(policy.Interval)
+		if err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				path.Child("interval"),
+				policy.Interval,
+				"invalid duration format",
+			))
+		} else if interval < minimumUpgradePolicyInterval {
+			allErrs = append(allErrs, field.Invalid(
+				path.Child("interval"),
+				policy.Interval,
+				"interval must be at least 1 minute",
+			))
+		}
+	}
+
+	if policy.SemverConstraint != "" {
+		if _, err := semver.NewConstraint(policy.SemverConstraint); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				path.Child("semverConstraint"),
+				policy.SemverConstraint,
+				"invalid semantic version constraint",
+			))
+		}
+	}
+
+	if !policy.Enabled {
+		return allErrs
+	}
+
+	sourceRef, err := parseUpgradePolicyOCISource(pkg.Spec.Source)
+	if err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "source"),
+			pkg.Spec.Source,
+			err.Error(),
+		))
+		return allErrs
+	}
+	semverTag := strings.TrimPrefix(sourceRef.tag, "v")
+	if sourceRef.tag != semverTag && strings.HasPrefix(semverTag, "v") {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "source"),
+			pkg.Spec.Source,
+			"upgradePolicy requires spec.source to use a semantic version tag",
+		))
+		return allErrs
+	}
+	if strings.Contains(sourceRef.tag, "+") {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "source"),
+			pkg.Spec.Source,
+			"upgradePolicy requires spec.source to use an OCI-compatible semantic version tag without build metadata",
+		))
+		return allErrs
+	}
+	if _, err := semver.StrictNewVersion(semverTag); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "source"),
+			pkg.Spec.Source,
+			"upgradePolicy requires spec.source to use a semantic version tag",
+		))
+	}
+
+	return allErrs
+}
+
+type upgradePolicySourceRef struct {
+	tag string
+}
+
+func parseUpgradePolicyOCISource(source string) (upgradePolicySourceRef, error) {
+	if !strings.HasPrefix(source, "oci://") {
+		return upgradePolicySourceRef{}, fmt.Errorf("upgradePolicy requires an OCI source")
+	}
+	trimmed := strings.TrimPrefix(source, "oci://")
+	if strings.Contains(trimmed, "@") {
+		return upgradePolicySourceRef{}, fmt.Errorf("upgradePolicy requires a tag source, not a digest source")
+	}
+	lastSlash := strings.LastIndex(trimmed, "/")
+	lastColon := strings.LastIndex(trimmed, ":")
+	if lastColon <= lastSlash || lastColon == len(trimmed)-1 {
+		return upgradePolicySourceRef{}, fmt.Errorf("upgradePolicy requires spec.source to include an explicit tag")
+	}
+	return upgradePolicySourceRef{tag: trimmed[lastColon+1:]}, nil
 }

@@ -109,6 +109,10 @@ kubectl delete zarfpackage podinfo dos-games
 | `maxRetries` | int32 | 0 | Max consecutive failures before permanent Failed (0=unlimited) |
 | `timeout` | string | 15m | Max duration for deployment |
 | `syncPolicy` | enum | Ignore | Drift handling: Ignore, Detect, Remediate |
+| `upgradePolicy.enabled` | bool | false | Poll the OCI repository for newer semantic-version tags and deploy them automatically |
+| `upgradePolicy.strategy` | enum | SemVer | Upgrade discovery strategy. Currently only SemVer is supported |
+| `upgradePolicy.interval` | string | controller requeue interval | Poll interval for checking OCI tags. When set, it must be a valid duration of at least `1m`, for example `5m` |
+| `upgradePolicy.semverConstraint` | string | | Optional semver constraint such as `~1.0` or `>=1.0.0 <2.0.0` |
 | `suspend` | bool | false | Pause all reconciliation |
 | `yolo` | bool | false | Deploy without `zarf init` (connected only) |
 | `ociConcurrency` | int | 6 | Concurrent OCI layer downloads |
@@ -138,6 +142,42 @@ kubectl patch zarfpackage my-package --type merge -p '{"spec":{"suspend":true}}'
 # Resume
 kubectl patch zarfpackage my-package --type merge -p '{"spec":{"suspend":false}}'
 ```
+
+### Automatic SemVer Upgrades
+
+For tagged semantic-versioned OCI package sources, enable `upgradePolicy` to
+let the operator poll the same OCI repository and deploy newer stable semver
+tags. When `upgradePolicy.enabled` is true, `spec.source` must be an OCI source
+with an explicit semantic-version tag, not a file path, digest, or `latest`.
+The operator does not mutate `spec.source`; it records the deployed resolved
+source in `status.source`. `status.availableSource` and
+`status.availableVersion` are pending-upgrade fields and are cleared after the
+candidate is deployed or invalidated. Custom poll intervals must be valid
+durations of at least `1m`.
+
+```yaml
+apiVersion: zarf.dev/v1alpha1
+kind: ZarfPackage
+metadata:
+  name: my-package
+spec:
+  source: "oci://registry.example.com/my-org/my-package:1.0.0"
+  registryCredentialSecretRef: private-registry-auth
+  upgradePolicy:
+    enabled: true
+    strategy: SemVer
+    interval: 5m
+    semverConstraint: ">=1.0.0 <2.0.0"
+```
+
+Only tags newer than the currently deployed semantic version are eligible.
+Prerelease tags are ignored by default, and non-semver tags such as `latest` are
+ignored.
+
+Disabling `upgradePolicy` stops future polling without rolling back an already
+deployed auto-upgrade. To intentionally redeploy the pinned `spec.source`,
+disable the policy, set `spec.source` to the target tag, and use the redeploy
+annotation below.
 
 ### Force Redeploy
 
@@ -270,4 +310,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

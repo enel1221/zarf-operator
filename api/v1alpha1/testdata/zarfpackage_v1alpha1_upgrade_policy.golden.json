@@ -1,0 +1,19 @@
+{
+  "apiVersion": "zarf.dev/v1alpha1",
+  "kind": "ZarfPackage",
+  "metadata": {
+    "name": "upgrade-policy-golden-test",
+    "namespace": "default",
+    "creationTimestamp": null
+  },
+  "spec": {
+    "source": "oci://example.com/pkg:1.0.0",
+    "upgradePolicy": {
+      "enabled": true,
+      "strategy": "SemVer",
+      "interval": "1m",
+      "semverConstraint": "~1.0"
+    }
+  },
+  "status": {}
+}

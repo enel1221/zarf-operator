@@ -14,7 +14,8 @@ COPY pkg/ pkg/
 COPY internal/ internal/
 COPY proto/ proto/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o zarf-sidecar ./cmd/sidecar
+RUN targetarch="${TARGETARCH:-$(go env GOARCH)}" \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${targetarch} go build -o zarf-sidecar ./cmd/sidecar
 
 # Use Alpine as base — Zarf package deployments may execute shell scripts,
 # component actions, and wait-for hooks that require bash and common CLI tools.
@@ -38,7 +39,9 @@ RUN apk add --no-cache \
     tar \
     wget \
     && adduser -D -u 65532 -g 65532 nonroot \
-    && curl -fsSL "https://github.com/zarf-dev/zarf/releases/download/v${ZARF_VERSION}/zarf_v${ZARF_VERSION}_Linux_${TARGETARCH}" -o /usr/local/bin/zarf \
+    && targetarch="${TARGETARCH:-$(apk --print-arch)}" \
+    && case "$targetarch" in x86_64) targetarch=amd64 ;; aarch64) targetarch=arm64 ;; esac \
+    && curl -fsSL "https://github.com/zarf-dev/zarf/releases/download/v${ZARF_VERSION}/zarf_v${ZARF_VERSION}_Linux_${targetarch}" -o /usr/local/bin/zarf \
     && chmod +x /usr/local/bin/zarf
 WORKDIR /
 COPY --from=builder /workspace/zarf-sidecar .

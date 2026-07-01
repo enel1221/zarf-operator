@@ -89,6 +89,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 
 # E2E test cluster settings
 E2E_KIND_CLUSTER ?= zarf-operator-e2e
+E2E_REGISTRY_HOST ?= localhost
 E2E_REGISTRY_NODEPORT ?= 30500
 E2E_REGISTRY_HOST_PORT ?= 5001
 E2E_IMG ?= example.com/zarf-operator:v0.0.1
@@ -110,7 +111,16 @@ E2E_PKG_DIRS := test/e2e/testdata/packages/nginx \
 .PHONY: e2e-setup
 e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 	@echo "Creating Kind cluster '$(E2E_KIND_CLUSTER)'..."
-	$(KIND) create cluster --name $(E2E_KIND_CLUSTER) --config test/e2e/kind-config.yaml --wait 60s
+	@kind_config=$$(mktemp); \
+	cleanup() { rm -f "$$kind_config"; }; \
+	trap cleanup EXIT; \
+	sed \
+		-e 's/containerPort: 30500/containerPort: $(E2E_REGISTRY_NODEPORT)/' \
+		-e 's/hostPort: 5001/hostPort: $(E2E_REGISTRY_HOST_PORT)/' \
+		-e 's/containerPort: 30501/containerPort: $(E2E_AUTH_REGISTRY_NODEPORT)/' \
+		-e 's/hostPort: 5002/hostPort: $(E2E_AUTH_REGISTRY_HOST_PORT)/' \
+		test/e2e/kind-config.yaml > "$$kind_config"; \
+	$(KIND) create cluster --name $(E2E_KIND_CLUSTER) --config "$$kind_config" --wait 60s
 	@echo "Loading operator images into Kind..."
 	$(KIND) load docker-image $(IMG) --name $(E2E_KIND_CLUSTER)
 	$(KIND) load docker-image $(SIDECAR_IMG) --name $(E2E_KIND_CLUSTER)
@@ -118,11 +128,11 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 	$(CONTAINER_TOOL) pull registry:2
 	$(KIND) load docker-image registry:2 --name $(E2E_KIND_CLUSTER)
 	@echo "Deploying in-cluster OCI registry..."
-	$(KUBECTL) apply -f test/e2e/testdata/registry.yaml
+	sed -e 's/nodePort: 30500/nodePort: $(E2E_REGISTRY_NODEPORT)/' test/e2e/testdata/registry.yaml | $(KUBECTL) apply -f -
 	$(KUBECTL) rollout status deployment/registry -n e2e-registry --timeout=120s
-	@echo "Waiting for registry to be reachable on localhost:$(E2E_REGISTRY_HOST_PORT)..."
+	@echo "Waiting for registry to be reachable on $(E2E_REGISTRY_HOST):$(E2E_REGISTRY_HOST_PORT)..."
 	@for i in $$(seq 1 30); do \
-		if curl -sf http://localhost:$(E2E_REGISTRY_HOST_PORT)/v2/ >/dev/null 2>&1; then \
+		if curl -sf http://$(E2E_REGISTRY_HOST):$(E2E_REGISTRY_HOST_PORT)/v2/ >/dev/null 2>&1; then \
 			echo "Registry is ready."; \
 			break; \
 		fi; \
@@ -135,10 +145,10 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 	done
 	@echo "Setting up authenticated OCI registry..."
 	$(KUBECTL) create namespace e2e-registry-auth --dry-run=client -o yaml | $(KUBECTL) apply -f -
-	@HTPASSWD=$$(docker run --rm --entrypoint htpasswd httpd:2-alpine -Bbn testuser testpass) && \
+	@HTPASSWD=$$(printf '%s\n' 'testpass' | docker run --rm -i --entrypoint htpasswd httpd:2-alpine -Bni testuser) && \
 		$(KUBECTL) create secret generic registry-htpasswd -n e2e-registry-auth \
 			--from-literal=htpasswd="$$HTPASSWD" --dry-run=client -o yaml | $(KUBECTL) apply -f -
-	$(KUBECTL) apply -f test/e2e/testdata/registry-auth.yaml
+	sed -e 's/nodePort: 30501/nodePort: $(E2E_AUTH_REGISTRY_NODEPORT)/' test/e2e/testdata/registry-auth.yaml | $(KUBECTL) apply -f -
 	@$(KUBECTL) rollout status deployment/registry-auth -n e2e-registry-auth --timeout=180s || { \
 		echo "Auth registry rollout failed; dumping diagnostics..."; \
 		$(KUBECTL) get pods -n e2e-registry-auth -o wide; \
@@ -147,9 +157,9 @@ e2e-setup: ## Create Kind cluster with in-cluster OCI registry for e2e tests.
 		$(KUBECTL) logs deployment/registry-auth -n e2e-registry-auth --all-containers=true --tail=200 || true; \
 		exit 1; \
 	}
-	@echo "Waiting for auth registry to be reachable on localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)..."
+	@echo "Waiting for auth registry to be reachable on $(E2E_REGISTRY_HOST):$(E2E_AUTH_REGISTRY_HOST_PORT)..."
 	@for i in $$(seq 1 30); do \
-		status=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)/v2/ 2>/dev/null || echo "000"); \
+		status=$$(curl -s -o /dev/null -w "%{http_code}" http://$(E2E_REGISTRY_HOST):$(E2E_AUTH_REGISTRY_HOST_PORT)/v2/ 2>/dev/null || echo "000"); \
 		if [ "$$status" = "401" ]; then \
 			echo "Auth registry is ready (401 Unauthorized as expected)."; \
 			break; \
@@ -172,18 +182,23 @@ e2e-publish-packages: ## Build and publish all test Zarf packages to the in-clus
 		echo "Building Zarf package from $$pkg_dir ($$pkg_name)..."; \
 		cd $$pkg_dir && zarf package create . --confirm --output /tmp/zarf-e2e-pkg/ && cd -; \
 		echo "Publishing $$pkg_name to in-cluster registry..."; \
-		zarf package publish $$(ls /tmp/zarf-e2e-pkg/zarf-package-$$pkg_name-*.tar.zst) oci://localhost:$(E2E_REGISTRY_HOST_PORT) --plain-http; \
+		zarf package publish $$(ls /tmp/zarf-e2e-pkg/zarf-package-$$pkg_name-*.tar.zst) oci://$(E2E_REGISTRY_HOST):$(E2E_REGISTRY_HOST_PORT) --plain-http; \
 		rm -rf /tmp/zarf-e2e-pkg/; \
 	done
 
 .PHONY: e2e-publish-auth-packages
 e2e-publish-auth-packages: ## Publish test package to auth-protected registry.
 	@echo "Publishing nginx package to auth-protected registry..."
-	@tmpdir=$$(mktemp -d) && \
-	echo '{"auths":{"localhost:$(E2E_AUTH_REGISTRY_HOST_PORT)":{"auth":"'$$(printf 'testuser:testpass' | base64)'"}}}' > $$tmpdir/config.json && \
-	cd test/e2e/testdata/packages/nginx && zarf package create . --confirm --output /tmp/zarf-e2e-auth-pkg/ && cd - && \
-	DOCKER_CONFIG=$$tmpdir zarf package publish $$(ls /tmp/zarf-e2e-auth-pkg/zarf-package-e2e-test-nginx-*.tar.zst) oci://localhost:$(E2E_AUTH_REGISTRY_HOST_PORT) --plain-http && \
-	rm -rf /tmp/zarf-e2e-auth-pkg/ $$tmpdir
+	@set -e; \
+	tmpdir=$$(mktemp -d); \
+	cleanup() { rm -rf /tmp/zarf-e2e-auth-pkg/ "$$tmpdir"; }; \
+	trap cleanup EXIT; \
+	auth_b64=$$(printf '%s' 'testuser:testpass' | base64 | tr -d '\n'); \
+	printf '{"auths":{"$(E2E_REGISTRY_HOST):$(E2E_AUTH_REGISTRY_HOST_PORT)":{"auth":"%s"}}}\n' "$$auth_b64" > "$$tmpdir/config.json"; \
+	cd test/e2e/testdata/packages/nginx; \
+	zarf package create . --confirm --output /tmp/zarf-e2e-auth-pkg/; \
+	cd - >/dev/null; \
+	DOCKER_CONFIG=$$tmpdir zarf package publish $$(ls /tmp/zarf-e2e-auth-pkg/zarf-package-e2e-test-nginx-*.tar.zst) oci://$(E2E_REGISTRY_HOST):$(E2E_AUTH_REGISTRY_HOST_PORT) --plain-http
 
 .PHONY: e2e-clean
 e2e-clean: ## Tear down the e2e Kind cluster.
@@ -195,7 +210,7 @@ test-e2e: manifests generate fmt vet ## Run e2e tests against existing cluster (
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	KIND_CLUSTER=$(E2E_KIND_CLUSTER) CERT_MANAGER_INSTALL_SKIP=true go test ./test/e2e/ -v -ginkgo.v -timeout 60m
+	KIND_CLUSTER=$(E2E_KIND_CLUSTER) CERT_MANAGER_INSTALL_SKIP=true E2E_REGISTRY_HOST=$(E2E_REGISTRY_HOST) E2E_REGISTRY_HOST_PORT=$(E2E_REGISTRY_HOST_PORT) E2E_AUTH_REGISTRY_HOST_PORT=$(E2E_AUTH_REGISTRY_HOST_PORT) go test ./test/e2e/ -v -ginkgo.v -timeout 60m
 
 .PHONY: test-e2e-fresh
 test-e2e-fresh: manifests generate fmt vet ## Full cluster teardown, rebuild images, and run e2e tests.
@@ -291,15 +306,22 @@ docker-push-all: docker-push docker-push-sidecar ## Push all docker images.
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+# SIDECAR_PLATFORMS is narrower because Dockerfile.sidecar installs the Zarf CLI,
+# and upstream Zarf release assets are only available for these Linux arches.
+SIDECAR_PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name zarf-operator-builder
-	$(CONTAINER_TOOL) buildx use zarf-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm zarf-operator-builder
-	rm Dockerfile.cross
+	@builder="zarf-operator-builder-$$$$"; \
+	tmp_dockerfile=$$(mktemp Dockerfile.cross.XXXXXX); \
+	cleanup() { \
+		$(CONTAINER_TOOL) buildx rm "$$builder" >/dev/null 2>&1 || true; \
+		rm -f "$$tmp_dockerfile"; \
+	}; \
+	trap cleanup EXIT; \
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > "$$tmp_dockerfile"; \
+	$(CONTAINER_TOOL) buildx create --name "$$builder"; \
+	$(CONTAINER_TOOL) buildx use "$$builder"; \
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f "$$tmp_dockerfile" .
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
@@ -420,16 +442,20 @@ zarf-publish: zarf-package ## Publish the Zarf package to OCI registry.
 
 .PHONY: docker-buildx-all
 docker-buildx-all: ## Build and push multi-arch images for manager and sidecar.
-	# Manager image
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name zarf-operator-builder
-	$(CONTAINER_TOOL) buildx use zarf-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	# Sidecar image
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile.sidecar > Dockerfile.sidecar.cross
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${SIDECAR_IMG} -f Dockerfile.sidecar.cross .
-	- $(CONTAINER_TOOL) buildx rm zarf-operator-builder
-	rm -f Dockerfile.cross Dockerfile.sidecar.cross
+	@builder="zarf-operator-builder-$$$$"; \
+	manager_dockerfile=$$(mktemp Dockerfile.cross.XXXXXX); \
+	sidecar_dockerfile=$$(mktemp Dockerfile.sidecar.cross.XXXXXX); \
+	cleanup() { \
+		$(CONTAINER_TOOL) buildx rm "$$builder" >/dev/null 2>&1 || true; \
+		rm -f "$$manager_dockerfile" "$$sidecar_dockerfile"; \
+	}; \
+	trap cleanup EXIT; \
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > "$$manager_dockerfile"; \
+	$(CONTAINER_TOOL) buildx create --name "$$builder"; \
+	$(CONTAINER_TOOL) buildx use "$$builder"; \
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f "$$manager_dockerfile" .; \
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile.sidecar > "$$sidecar_dockerfile"; \
+	$(CONTAINER_TOOL) buildx build --push --platform=$(SIDECAR_PLATFORMS) --tag ${SIDECAR_IMG} -f "$$sidecar_dockerfile" .
 
 .PHONY: release
 release: docker-buildx-all helm-push zarf-publish ## Build and publish all release artifacts.

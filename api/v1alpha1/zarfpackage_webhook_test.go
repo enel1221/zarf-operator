@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,9 +77,10 @@ func TestValidateCreate(t *testing.T) {
 	v := &zarfPackageCustomValidator{}
 
 	tests := []struct {
-		name    string
-		pkg     *ZarfPackage
-		wantErr bool
+		name            string
+		pkg             *ZarfPackage
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name: "valid package",
@@ -172,6 +174,146 @@ func TestValidateCreate(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "valid semver upgrade policy",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:1.0.0",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:          true,
+						Strategy:         UpgradeStrategySemVer,
+						Interval:         "1m",
+						SemverConstraint: "~1.0",
+					},
+				},
+			},
+		},
+		{
+			name: "upgrade policy requires tagged oci source",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "https://registry.example.com/team/pkg:1.0.0",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "1m",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "upgrade policy requires semver source tag",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:latest",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "1m",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "upgrade policy rejects coerced semver source tag",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:1.2",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "1m",
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "semantic version tag",
+		},
+		{
+			name: "upgrade policy rejects uppercase v source tag",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:V1.0.0",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "1m",
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "semantic version tag",
+		},
+		{
+			name: "upgrade policy rejects build metadata source tag",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:1.0.0+build.1",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "1m",
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "without build metadata",
+		},
+		{
+			name: "upgrade policy rejects invalid interval",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:1.0.0",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "fast",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "upgrade policy rejects interval below one minute",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:1.0.0",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:  true,
+						Strategy: UpgradeStrategySemVer,
+						Interval: "1ns",
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "at least 1 minute",
+		},
+		{
+			name: "upgrade policy rejects invalid semver constraint",
+			pkg: &ZarfPackage{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-auto-upgrade", Namespace: "default"},
+				Spec: ZarfPackageSpec{
+					Source: "oci://registry.example.com/team/pkg:1.0.0",
+					UpgradePolicy: &UpgradePolicy{
+						Enabled:          true,
+						Strategy:         UpgradeStrategySemVer,
+						Interval:         "1m",
+						SemverConstraint: "not a constraint",
+					},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -182,6 +324,14 @@ func TestValidateCreate(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+			if tt.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErrContains)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrContains, err)
+				}
 			}
 		})
 	}

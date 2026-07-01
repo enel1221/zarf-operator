@@ -111,10 +111,53 @@ type InitOptions struct {
 	RegistryInfo *RegistryInfoOptions `json:"registryInfo,omitempty"`
 }
 
+// UpgradeStrategy selects how the operator discovers newer package sources.
+// +kubebuilder:validation:Enum=SemVer
+type UpgradeStrategy string
+
+const (
+	// UpgradeStrategySemVer discovers newer semantic-version OCI tags in the
+	// same repository as spec.source.
+	UpgradeStrategySemVer UpgradeStrategy = "SemVer"
+)
+
+// UpgradePolicy configures automatic package source upgrades. It is disabled
+// unless Enabled is true. The controller never mutates spec.source; it records
+// discovered and deployed upgrade sources in status.
+type UpgradePolicy struct {
+	// Enabled turns on automatic upgrade checks for this package.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Strategy selects the upgrade discovery strategy. SemVer lists OCI tags in
+	// the source repository and chooses the newest stable semantic version newer
+	// than the currently deployed source tag.
+	// +kubebuilder:default=SemVer
+	// +optional
+	Strategy UpgradeStrategy `json:"strategy,omitempty"`
+
+	// Interval controls how often the controller polls the OCI registry for
+	// newer tags. When omitted, the controller's global requeue interval is used.
+	// When set, the interval must parse as a Go duration and be at least 1m.
+	// +optional
+	// +kubebuilder:validation:MaxLength=32
+	Interval string `json:"interval,omitempty"`
+
+	// SemverConstraint optionally limits eligible tags, for example "~1.0" or
+	// ">=1.0.0 <2.0.0". Tags must still be newer than the currently deployed tag.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	SemverConstraint string `json:"semverConstraint,omitempty"`
+}
+
 // ZarfPackageSpec defines the desired state of ZarfPackage.
+// +kubebuilder:validation:XValidation:rule="!has(self.upgradePolicy) || !has(self.upgradePolicy.enabled) || self.upgradePolicy.enabled == false || (self.source.startsWith('oci://') && !self.source.contains('@') && self.source.matches('^oci://.+:v?(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?$'))",message="upgradePolicy.enabled requires spec.source to be an OCI source with an explicit semantic version tag"
+// +kubebuilder:validation:XValidation:rule="!has(self.upgradePolicy) || !has(self.upgradePolicy.interval) || self.upgradePolicy.interval.matches('^$') || (self.upgradePolicy.interval.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$') && duration(self.upgradePolicy.interval) >= duration('1m'))",message="upgradePolicy.interval must be empty or a valid duration at least 1 minute"
 type ZarfPackageSpec struct {
 	// Source is the location of the Zarf package OCI
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=2048
 	Source string `json:"source"`
 
 	// DependsOn specifies ZarfPackages that must be in Deployed phase before this package deploys.
@@ -259,6 +302,11 @@ type ZarfPackageSpec struct {
 	// redeploy.
 	// +optional
 	InitOptions *InitOptions `json:"initOptions,omitempty"`
+
+	// UpgradePolicy configures opt-in automatic upgrades for semantic-versioned
+	// OCI package sources.
+	// +optional
+	UpgradePolicy *UpgradePolicy `json:"upgradePolicy,omitempty"`
 }
 
 // SyncPolicy defines how the operator handles drift between desired and actual state
@@ -336,6 +384,10 @@ const (
 
 	// ConditionTypeDependenciesMet indicates whether all declared dependencies are deployed.
 	ConditionTypeDependenciesMet ZarfPackageConditionType = "DependenciesMet"
+
+	// ConditionTypeUpgradeAvailable reports whether the upgrade policy has
+	// discovered a newer semantic-version OCI source than the deployed source.
+	ConditionTypeUpgradeAvailable ZarfPackageConditionType = "UpgradeAvailable"
 )
 
 // Reason constants used when setting status conditions.
@@ -397,6 +449,20 @@ type ZarfPackageStatus struct {
 	// LastFailureTime is when the last failure occurred.
 	// +optional
 	LastFailureTime *metav1.Time `json:"lastFailureTime,omitempty"`
+
+	// AvailableVersion is the newest semantic package version discovered by the
+	// upgrade policy.
+	// +optional
+	AvailableVersion string `json:"availableVersion,omitempty"`
+
+	// AvailableSource is the OCI source for AvailableVersion.
+	// +optional
+	AvailableSource string `json:"availableSource,omitempty"`
+
+	// LastUpgradeCheckTime is when the upgrade policy last checked the source
+	// registry for newer tags.
+	// +optional
+	LastUpgradeCheckTime *metav1.Time `json:"lastUpgradeCheckTime,omitempty"`
 }
 
 type DriftInfo struct {
