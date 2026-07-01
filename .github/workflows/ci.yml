@@ -251,7 +251,7 @@ jobs:
       - name: Update chart version
         run: |
           sed -i "s/^version:.*/version: ${{ needs.release-metadata.outputs.version }}/" dist/chart/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${{ needs.release-metadata.outputs.version }}\"/" dist/chart/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ needs.release-metadata.outputs.image_tag }}\"/" dist/chart/Chart.yaml
 
       - name: Set chart prerelease annotation
         run: |
@@ -356,4 +356,3 @@ jobs:
           name: install-bundle-${{ needs.release-metadata.outputs.version }}
           path: dist/install.yaml
           if-no-files-found: error
-

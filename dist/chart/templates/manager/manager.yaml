@@ -43,7 +43,7 @@ spec:
             - --concurrent={{ .Values.controllerManager.concurrent }}
           command:
             - /manager
-          image: {{ .Values.controllerManager.container.image.repository }}:{{ .Values.controllerManager.container.image.tag }}
+          image: "{{ .Values.controllerManager.container.image.repository }}:{{ default .Chart.AppVersion .Values.controllerManager.container.image.tag }}"
           env:
             - name: ZARF_SIDECAR_ADDRESS
               value: "localhost:{{ .Values.sidecar.port }}"
@@ -71,7 +71,7 @@ spec:
           {{- end }}
         {{- if .Values.sidecar.enabled }}
         - name: sidecar
-          image: {{ .Values.sidecar.image.repository }}:{{ .Values.sidecar.image.tag }}
+          image: "{{ .Values.sidecar.image.repository }}:{{ default .Chart.AppVersion .Values.sidecar.image.tag }}"
           ports:
             - containerPort: {{ .Values.sidecar.port }}
               name: grpc

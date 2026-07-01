@@ -5,7 +5,8 @@ controllerManager:
   container:
     image:
       repository: ghcr.io/enel1221/zarf-operator
-      tag: main
+      # Defaults to Chart.appVersion when empty.
+      tag: ""
     args:
       - "--leader-elect"
       - "--metrics-bind-address=:8443"
@@ -86,7 +87,8 @@ sidecar:
   enabled: true
   image:
     repository: ghcr.io/enel1221/zarf-operator-sidecar
-    tag: main
+    # Defaults to Chart.appVersion when empty.
+    tag: ""
   port: 50051
   cachePath: /tmp/cache
   cache:
