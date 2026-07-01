@@ -19,6 +19,7 @@ import (
 	"github.com/zarf-dev/zarf/src/pkg/logger"
 	"github.com/zarf-dev/zarf/src/pkg/packager"
 	"github.com/zarf-dev/zarf/src/pkg/packager/filters"
+	"github.com/zarf-dev/zarf/src/pkg/packager/layout"
 	"github.com/zarf-dev/zarf/src/pkg/state"
 	"github.com/zarf-dev/zarf/src/pkg/zoci"
 	"google.golang.org/grpc/codes"
@@ -49,6 +50,9 @@ type ZarfServer struct {
 	baseConfig logger.Config
 	version    string
 	cachePath  string
+	loadPkg    func(context.Context, string, packager.LoadOptions) (*layout.PackageLayout, error)
+	deployPkg  func(context.Context, *layout.PackageLayout, packager.DeployOptions) (packager.DeployResult, error)
+	verifyImgs func(context.Context, *layout.PackageLayout, packager.DeployOptions) error
 	mu         sync.Mutex
 	active     *activeOperation
 }
@@ -68,6 +72,9 @@ func NewZarfServer(baseLogger *slog.Logger, baseConfig logger.Config, version st
 		baseConfig: baseConfig,
 		version:    version,
 		cachePath:  cachePath,
+		loadPkg:    packager.LoadPackage,
+		deployPkg:  packager.Deploy,
+		verifyImgs: verifyDeployedPackageImages,
 	}
 }
 
@@ -337,7 +344,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	}
 	log.Debug("loading package", "source", req.Source, "architecture", req.Architecture)
 
-	pkgLayout, err := packager.LoadPackage(ctx, req.Source, loadOpts)
+	pkgLayout, err := s.loadPkg(ctx, req.Source, loadOpts)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return nil, status.Error(codes.Canceled, "operation cancelled")
@@ -389,7 +396,7 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 	}
 	log.Debug("deploying package", "package", pkgLayout.Pkg.Metadata.Name, "version", pkgLayout.Pkg.Metadata.Version)
 
-	result, err := packager.Deploy(ctx, pkgLayout, deployOpts)
+	result, err := s.deployPkg(ctx, pkgLayout, deployOpts)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return nil, status.Error(codes.Canceled, "deploy cancelled")
@@ -406,6 +413,21 @@ func (s *ZarfServer) Deploy(ctx context.Context, req *zarfv1.DeployRequest) (*za
 		if detailErr != nil {
 			log.Warn("failed to attach deploy error details", "error", detailErr)
 			return nil, status.Errorf(classifyDeployError(err), "deployment failed: %v", err)
+		}
+		return nil, st.Err()
+	}
+	if err := s.verifyImgs(ctx, pkgLayout, deployOpts); err != nil {
+		log.Error("post-deploy image verification failed", "error", err, "package", pkgLayout.Pkg.Metadata.Name)
+		detail := &zarfv1.DeployErrorDetail{
+			FailedComponent: failedImageComponent(err),
+			ErrorMessage:    err.Error(),
+			DeployLogs:      capture.Lines(),
+		}
+		code := classifyOCIError(err)
+		st, detailErr := status.New(code, fmt.Sprintf("deployment image verification failed: %v", err)).WithDetails(detail)
+		if detailErr != nil {
+			log.Warn("failed to attach deploy error details", "error", detailErr)
+			return nil, status.Errorf(code, "deployment image verification failed: %v", err)
 		}
 		return nil, st.Err()
 	}

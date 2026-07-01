@@ -283,6 +283,12 @@ func (r *ZarfPackageReconciler) reconcile(
 	zarfClient zarf.Client,
 	original *opsv1alpha1.ZarfPackage,
 ) (ctrl.Result, error) {
+	if isMaxRetriesTerminal(zarfPkg) {
+		if _, ok := zarfPkg.Annotations[AnnotationRedeploy]; !ok {
+			return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+		}
+	}
+
 	// Check current deployment state only when package name is known.
 	var (
 		deployedPkg               *zarf.PackageInfo
@@ -332,7 +338,7 @@ func (r *ZarfPackageReconciler) reconcile(
 				return ctrl.Result{}, depErr
 			}
 			if !dependenciesMet {
-				preserveCurrentDeployment = deployedLookupFailed && zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseDeployed && !hasFailedStatusComponent(zarfPkg.Status.ComponentStatuses)
+				preserveCurrentDeployment = deployedLookupFailed && canPreserveCurrentDeployment(zarfPkg)
 				return r.waitForDependencies(zarfPkg, notReadyDeps, deployedPkg, preserveCurrentDeployment), nil
 			}
 			r.markDependenciesMet(zarfPkg)
@@ -369,6 +375,9 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 
 	// Check for failed components that need retry
 	if hasFailedDeployedComponent(deployedPkg) {
+		return true
+	}
+	if zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseFailed {
 		return true
 	}
 
@@ -424,6 +433,11 @@ func hasFailedDeployedComponent(deployedPkg *zarf.PackageInfo) bool {
 		if comp.Status == zarf.ComponentStatusFailed {
 			return true
 		}
+		for _, chart := range comp.InstalledCharts {
+			if chart.Status == zarf.ChartStatusFailed {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -433,8 +447,52 @@ func hasFailedStatusComponent(componentStatuses []opsv1alpha1.ComponentStatus) b
 		if comp.Status == string(zarf.ComponentStatusFailed) {
 			return true
 		}
+		for _, chart := range comp.InstalledCharts {
+			if chart.Status == string(zarf.ChartStatusFailed) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+func canPreserveCurrentDeployment(zarfPkg *opsv1alpha1.ZarfPackage) bool {
+	if zarfPkg.Status.Phase != opsv1alpha1.ZarfPackagePhaseDeployed {
+		return false
+	}
+	if strings.TrimSpace(zarfPkg.Status.LastAttemptError) != "" {
+		return false
+	}
+	if hasFailedStatusComponent(zarfPkg.Status.ComponentStatuses) {
+		return false
+	}
+	for _, cond := range zarfPkg.Status.Conditions {
+		if cond.Type == string(opsv1alpha1.ConditionTypeReady) {
+			return cond.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func isMaxRetriesTerminal(zarfPkg *opsv1alpha1.ZarfPackage) bool {
+	if zarfPkg.Status.Phase != opsv1alpha1.ZarfPackagePhaseFailed {
+		return false
+	}
+	ready := apimeta.FindStatusCondition(zarfPkg.Status.Conditions, string(opsv1alpha1.ConditionTypeReady))
+	return ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == ReasonMaxRetriesExceeded
+}
+
+func shouldPreserveFailedReadyCondition(zarfPkg *opsv1alpha1.ZarfPackage) bool {
+	if zarfPkg.Status.Phase != opsv1alpha1.ZarfPackagePhaseFailed {
+		return false
+	}
+	if strings.TrimSpace(zarfPkg.Status.LastAttemptError) == "" {
+		return false
+	}
+	ready := apimeta.FindStatusCondition(zarfPkg.Status.Conditions, string(opsv1alpha1.ConditionTypeReady))
+	return ready != nil &&
+		ready.Status == metav1.ConditionFalse &&
+		(ready.Reason == ReasonDeployFailed || ready.Reason == ReasonMaxRetriesExceeded)
 }
 
 func (r *ZarfPackageReconciler) deploymentSpecChanged(zarfPkg *opsv1alpha1.ZarfPackage) bool {
@@ -651,6 +709,9 @@ func (r *ZarfPackageReconciler) deploy(
 	if err != nil {
 		result, err = r.retryDeployAfterHelmRecovery(ctx, log, zarfPkg, zarfClient, opts, timeout, err)
 	}
+	if err == nil {
+		err = failedDeployResultError(result)
+	}
 	if err != nil {
 		if status.Code(err) == codes.ResourceExhausted {
 			log.Info("sidecar busy with another operation, retrying deploy", "requeueAfter", sidecarBusyRequeue)
@@ -669,12 +730,17 @@ func (r *ZarfPackageReconciler) deploy(
 		log.Error(err, "deployment failed")
 		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
 		zarfPkg.Status.LastAttemptError = truncateMessage(err.Error(), 512)
+		if result != nil {
+			zarfPkg.Status.ComponentStatuses = r.convertComponentStatuses(result.DeployedComponents)
+		}
 		var deployErr *zarf.DeployError
 		if errors.As(err, &deployErr) {
 			r.markFailedComponentStatus(zarfPkg, deployErr)
 		}
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			ReasonDeployFailed, fmt.Sprintf("Deployment failed: %v", err))
+		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionFalse,
+			ReasonDeployFailed, "Deployment failed")
 		if r.recorder != nil {
 			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonDeployFailed, truncateMessage(err.Error(), 512))
 			if deployErr != nil {
@@ -1031,6 +1097,39 @@ func (r *ZarfPackageReconciler) applyDeploySuccessStatus(zarfPkg *opsv1alpha1.Za
 	}
 }
 
+func failedDeployResultError(result *zarf.DeployResult) error {
+	if result == nil {
+		return fmt.Errorf("deploy completed without a result")
+	}
+	for _, comp := range result.DeployedComponents {
+		if comp.Status == zarf.ComponentStatusFailed {
+			failedChart := firstFailedChartName(comp)
+			return &zarf.DeployError{
+				Err:             fmt.Errorf("deploy result reported failed component %q", comp.Name),
+				FailedComponent: comp.Name,
+				FailedChart:     failedChart,
+			}
+		}
+		if failedChart := firstFailedChartName(comp); failedChart != "" {
+			return &zarf.DeployError{
+				Err:             fmt.Errorf("deploy result reported failed chart %q in component %q", failedChart, comp.Name),
+				FailedComponent: comp.Name,
+				FailedChart:     failedChart,
+			}
+		}
+	}
+	return nil
+}
+
+func firstFailedChartName(comp zarf.DeployedComponent) string {
+	for _, chart := range comp.InstalledCharts {
+		if chart.Status == zarf.ChartStatusFailed {
+			return chart.ChartName
+		}
+	}
+	return ""
+}
+
 func (r *ZarfPackageReconciler) retryDeployAfterHelmRecovery(
 	ctx context.Context,
 	log logr.Logger,
@@ -1166,7 +1265,7 @@ func (r *ZarfPackageReconciler) markFailedComponentStatus(zarfPkg *opsv1alpha1.Z
 		ObservedGeneration: int(zarfPkg.Generation),
 	}
 
-	if strings.TrimSpace(zarfPkg.Spec.Namespace) != "" && strings.TrimSpace(deployErr.FailedChart) != "" {
+	if strings.TrimSpace(deployErr.FailedChart) != "" {
 		failed.InstalledCharts = []opsv1alpha1.InstalledChartStatus{
 			{
 				Namespace: zarfPkg.Spec.Namespace,
@@ -1178,12 +1277,44 @@ func (r *ZarfPackageReconciler) markFailedComponentStatus(zarfPkg *opsv1alpha1.Z
 
 	for i := range zarfPkg.Status.ComponentStatuses {
 		if zarfPkg.Status.ComponentStatuses[i].Name == failed.Name {
+			failed.InstalledCharts = mergeFailedChartEvidence(
+				zarfPkg.Status.ComponentStatuses[i].InstalledCharts,
+				failed.InstalledCharts,
+			)
 			zarfPkg.Status.ComponentStatuses[i] = failed
 			return
 		}
 	}
 
 	zarfPkg.Status.ComponentStatuses = append(zarfPkg.Status.ComponentStatuses, failed)
+}
+
+func mergeFailedChartEvidence(
+	existing []opsv1alpha1.InstalledChartStatus,
+	reported []opsv1alpha1.InstalledChartStatus,
+) []opsv1alpha1.InstalledChartStatus {
+	if len(existing) == 0 {
+		return reported
+	}
+	merged := append([]opsv1alpha1.InstalledChartStatus(nil), existing...)
+	for _, failedChart := range reported {
+		if strings.TrimSpace(failedChart.ChartName) == "" {
+			continue
+		}
+		found := false
+		for i := range merged {
+			if merged[i].ChartName != failedChart.ChartName {
+				continue
+			}
+			merged[i].Status = string(zarf.ChartStatusFailed)
+			found = true
+			break
+		}
+		if !found {
+			merged = append(merged, failedChart)
+		}
+	}
+	return merged
 }
 
 func (r *ZarfPackageReconciler) cleanupStuckHelmReleases(ctx context.Context, log logr.Logger, zarfPkg *opsv1alpha1.ZarfPackage) int {
@@ -1439,7 +1570,7 @@ func (r *ZarfPackageReconciler) waitForDependencies(
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeStalled, metav1.ConditionFalse,
 		opsv1alpha1.ReasonDependenciesNotMet, "Waiting for dependency readiness")
 
-	if deployedPkg != nil && !hasFailedDeployedComponent(deployedPkg) {
+	if deployedPkg != nil && !hasFailedDeployedComponent(deployedPkg) && canPreserveCurrentDeployment(zarfPkg) {
 		r.syncStatusFromDeployed(zarfPkg, deployedPkg)
 		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
@@ -1453,9 +1584,13 @@ func (r *ZarfPackageReconciler) waitForDependencies(
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
 			opsv1alpha1.ReasonDependenciesNotMet, message)
 	} else {
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-			opsv1alpha1.ReasonDependenciesNotMet, message)
-		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
+		if !shouldPreserveFailedReadyCondition(zarfPkg) {
+			r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
+				opsv1alpha1.ReasonDependenciesNotMet, message)
+		}
+		if zarfPkg.Status.Phase != opsv1alpha1.ZarfPackagePhaseFailed {
+			zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhasePending
+		}
 	}
 
 	if r.recorder != nil {

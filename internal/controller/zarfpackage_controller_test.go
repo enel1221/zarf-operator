@@ -330,6 +330,85 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(updated.Status.LastFailureTime).NotTo(BeNil())
 		})
 
+		It("should not mark Ready when deploy returns failed component status", func() {
+			nn := createResource("deploy-result-failed-component", true, "oci://example.com/pkg:v1")
+
+			fakeZarf := fake.New().
+				WithPackageMetadata(&zarf.PackageMetadata{Name: testPackageName, Version: "v1"}, nil).
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					return &zarf.DeployResult{
+						PackageName: testPackageName,
+						Version:     "v1",
+						Generation:  1,
+						DeployedComponents: []zarf.DeployedComponent{
+							{
+								Name:   "crossplane-functions",
+								Status: zarf.ComponentStatusFailed,
+								InstalledCharts: []zarf.InstalledChart{
+									{
+										Namespace: "crossplane",
+										ChartName: "jadeuc-function-helm",
+										Status:    zarf.ChartStatusFailed,
+									},
+								},
+							},
+						},
+					}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+			Expect(updated.Status.DeployedSpecHash).To(BeEmpty())
+			Expect(updated.Status.LastAttemptError).To(ContainSubstring("crossplane-functions"))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(ReasonDeployFailed))
+			Expect(updated.Status.ComponentStatuses).To(HaveLen(1))
+			Expect(updated.Status.ComponentStatuses[0].Name).To(Equal("crossplane-functions"))
+			Expect(updated.Status.ComponentStatuses[0].Status).To(Equal(string(zarf.ComponentStatusFailed)))
+			Expect(updated.Status.ComponentStatuses[0].InstalledCharts).To(HaveLen(1))
+			Expect(updated.Status.ComponentStatuses[0].InstalledCharts[0].ChartName).To(Equal("jadeuc-function-helm"))
+			Expect(updated.Status.ComponentStatuses[0].InstalledCharts[0].Status).To(Equal(string(zarf.ChartStatusFailed)))
+		})
+
+		It("should not mark Ready when sidecar reports missing target image", func() {
+			nn := createResource("deploy-missing-target-image", true, "oci://example.com/pkg:v1")
+
+			fakeZarf := fake.New().
+				WithPackageMetadata(&zarf.PackageMetadata{Name: testPackageName, Version: "v1"}, nil).
+				WithGetDeployedPackage(nil, nil).
+				WithDeploy(nil, &zarf.DeployError{
+					Err:             fmt.Errorf("missing target image sedptestregistry.azurecr.us/internal/jade-crossplane/schema-server:2.5.0: not found"),
+					FailedComponent: "crossplane-functions",
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+			Expect(updated.Status.DeployedSpecHash).To(BeEmpty())
+			Expect(updated.Status.LastAttemptError).To(ContainSubstring("schema-server:2.5.0"))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(ReasonDeployFailed))
+			progressing := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Status).To(Equal(metav1.ConditionFalse))
+			Expect(progressing.Reason).To(Equal(ReasonDeployFailed))
+			Expect(updated.Status.ComponentStatuses).To(HaveLen(1))
+			Expect(updated.Status.ComponentStatuses[0].Name).To(Equal("crossplane-functions"))
+			Expect(updated.Status.ComponentStatuses[0].Status).To(Equal(string(zarf.ComponentStatusFailed)))
+		})
+
 		It("should clear last attempt error after a successful redeploy", func() {
 			nn := createResource("deploy-clear-attempt-error", true, "oci://example.com/pkg:v2")
 
@@ -1118,6 +1197,70 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
 		})
 
+		It("should preserve failed status while waiting for dependencies after verification failure", func() {
+			dependencyNN := createResource("dep-verification-failure-unready", true, "oci://example.com/dep:v1")
+			dependencyObj := getResource(dependencyNN)
+			dependencyObj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
+			Expect(k8sClient.Status().Update(ctx, dependencyObj)).To(Succeed())
+
+			nn := createResource("dependent-verification-failed-waits", true, "oci://example.com/pkg:v1")
+			obj := getResource(nn)
+			obj.Spec.DependsOn = []opsv1alpha1.DependsOnReference{{Name: "dep-verification-failure-unready"}}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.LastAttemptError = "missing target image sedptestregistry.azurecr.us/internal/jade-crossplane/schema-server:2.5.0: not found"
+			obj.Status.ComponentStatuses = []opsv1alpha1.ComponentStatus{
+				{Name: "crossplane-functions", Status: string(zarf.ComponentStatusFailed)},
+			}
+			obj.Status.Conditions = []metav1.Condition{
+				{
+					Type:               string(opsv1alpha1.ConditionTypeReady),
+					Status:             metav1.ConditionFalse,
+					Reason:             ReasonDeployFailed,
+					Message:            "Deployment failed: missing target image schema-server:2.5.0",
+					ObservedGeneration: obj.Generation,
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{
+					Name:       testPackageName,
+					Version:    "v1",
+					Generation: 1,
+					DeployedComponents: []zarf.DeployedComponent{
+						{Name: "crossplane-functions", Status: zarf.ComponentStatusSucceeded},
+					},
+				}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: "v1", Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(dependencyRequeue))
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
+			Expect(updated.Status.LastAttemptError).To(ContainSubstring("schema-server:2.5.0"))
+			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(ReasonDeployFailed))
+			deps := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeDependenciesMet)
+			Expect(deps).NotTo(BeNil())
+			Expect(deps.Status).To(Equal(metav1.ConditionFalse))
+		})
+
 		It("should keep failed deployed components pending until dependencies are ready", func() {
 			dependencyNN := createResource("dep-failed-component-unready", true, "oci://example.com/dep:v1")
 			dependencyObj := getResource(dependencyNN)
@@ -1632,9 +1775,13 @@ var _ = Describe("ZarfPackage Controller", func() {
 			obj.Spec.MaxRetries = 3
 			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
 
+			deployCalled := 0
 			fakeZarf := fake.New().
 				WithGetDeployedPackage(nil, nil).
-				WithDeploy(nil, fmt.Errorf("connection refused"))
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return nil, fmt.Errorf("connection refused")
+				})
 
 			rec := record.NewFakeRecorder(100)
 			reconciler := &ZarfPackageReconciler{
@@ -1663,6 +1810,12 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(ReasonMaxRetriesExceeded))
 			expectEventReason(rec, ReasonMaxRetriesExceeded)
+			Expect(deployCalled).To(Equal(3))
+
+			result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(deployCalled).To(Equal(3))
 		})
 	})
 

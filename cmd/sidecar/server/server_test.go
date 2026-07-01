@@ -2,15 +2,25 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	zarfapi "github.com/zarf-dev/zarf/src/api/v1alpha1"
+	"github.com/zarf-dev/zarf/src/pkg/cluster"
 	"github.com/zarf-dev/zarf/src/pkg/logger"
+	"github.com/zarf-dev/zarf/src/pkg/packager"
+	"github.com/zarf-dev/zarf/src/pkg/packager/layout"
+	"github.com/zarf-dev/zarf/src/pkg/state"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/client-go/tools/clientcmd"
 
 	zarfv1 "github.com/enel1221/zarf-operator/pkg/zarf/v1"
 )
@@ -102,6 +112,441 @@ func TestDeployCancelsPreviousDeploy(t *testing.T) {
 	_, err := s.Deploy(ctx, &zarfv1.DeployRequest{Source: "oci://example.com/pkg:v1"})
 
 	assertCancelled(t, cancelled, err)
+}
+
+func TestDeployFailsWhenPostDeployImageVerificationFails(t *testing.T) {
+	s := NewZarfServer(nil, logger.Config{}, "test")
+	s.loadPkg = func(
+		context.Context,
+		string,
+		packager.LoadOptions,
+	) (*layout.PackageLayout, error) {
+		return &layout.PackageLayout{
+			Pkg: zarfapi.ZarfPackage{
+				Metadata: zarfapi.ZarfMetadata{
+					Name:    "crossplane-extras",
+					Version: "1.10.25",
+				},
+				Components: []zarfapi.ZarfComponent{
+					{
+						Name:   "crossplane-functions",
+						Images: []string{"registry.jadeuc.com/internal/jade-crossplane/schema-server:2.5.0"},
+					},
+				},
+			},
+		}, nil
+	}
+	s.deployPkg = func(
+		context.Context,
+		*layout.PackageLayout,
+		packager.DeployOptions,
+	) (packager.DeployResult, error) {
+		return packager.DeployResult{}, nil
+	}
+	s.verifyImgs = func(context.Context, *layout.PackageLayout, packager.DeployOptions) error {
+		return &imageVerificationError{
+			component: "crossplane-functions",
+			ref:       "sedptestregistry.azurecr.us/internal/jade-crossplane/schema-server:2.5.0",
+			err:       fmt.Errorf("not found"),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := s.Deploy(ctx, &zarfv1.DeployRequest{
+		Source:                  "oci://registry.jadeuc.com/internal/jade-packages/crossplane-extras:1.10.25",
+		Architecture:            "amd64",
+		SkipSignatureValidation: true,
+	})
+
+	if err == nil {
+		t.Fatalf("expected deploy to fail when post-deploy image verification fails")
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on verification failure, got %#v", resp)
+	}
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("expected NotFound for missing target image, got %v (%v)", got, err)
+	}
+	st := status.Convert(err)
+	var detail *zarfv1.DeployErrorDetail
+	for _, d := range st.Details() {
+		if typed, ok := d.(*zarfv1.DeployErrorDetail); ok {
+			detail = typed
+			break
+		}
+	}
+	if detail == nil {
+		t.Fatalf("expected DeployErrorDetail in verification failure")
+	}
+	if detail.FailedComponent != "crossplane-functions" {
+		t.Fatalf("FailedComponent = %q, want crossplane-functions", detail.FailedComponent)
+	}
+	if !strings.Contains(detail.ErrorMessage, "schema-server:2.5.0") {
+		t.Fatalf("ErrorMessage should include missing image, got %q", detail.ErrorMessage)
+	}
+}
+
+func TestDeployReportsActualFailedImageComponent(t *testing.T) {
+	s := NewZarfServer(nil, logger.Config{}, "test")
+	s.loadPkg = func(
+		context.Context,
+		string,
+		packager.LoadOptions,
+	) (*layout.PackageLayout, error) {
+		return &layout.PackageLayout{
+			Pkg: zarfapi.ZarfPackage{
+				Metadata: zarfapi.ZarfMetadata{Name: "multi-image", Version: "1.0.0"},
+				Components: []zarfapi.ZarfComponent{
+					{
+						Name:   "first-images",
+						Images: []string{"ghcr.io/example/first:v1"},
+					},
+					{
+						Name:   "schema-server",
+						Images: []string{"registry.jadeuc.com/internal/jade-crossplane/schema-server:2.5.0"},
+					},
+				},
+			},
+		}, nil
+	}
+	s.deployPkg = func(
+		context.Context,
+		*layout.PackageLayout,
+		packager.DeployOptions,
+	) (packager.DeployResult, error) {
+		return packager.DeployResult{}, nil
+	}
+	s.verifyImgs = func(context.Context, *layout.PackageLayout, packager.DeployOptions) error {
+		return &imageVerificationError{
+			component: "schema-server",
+			ref:       "sedptestregistry.azurecr.us/internal/jade-crossplane/schema-server:2.5.0",
+			err:       fmt.Errorf("not found"),
+		}
+	}
+
+	_, err := s.Deploy(context.Background(), &zarfv1.DeployRequest{
+		Source:                  "oci://registry.jadeuc.com/internal/jade-packages/crossplane-extras:1.10.25",
+		Architecture:            "amd64",
+		SkipSignatureValidation: true,
+	})
+	if err == nil {
+		t.Fatalf("expected deploy to fail")
+	}
+
+	st := status.Convert(err)
+	var detail *zarfv1.DeployErrorDetail
+	for _, d := range st.Details() {
+		if typed, ok := d.(*zarfv1.DeployErrorDetail); ok {
+			detail = typed
+			break
+		}
+	}
+	if detail == nil {
+		t.Fatalf("expected DeployErrorDetail in verification failure")
+	}
+	if detail.FailedComponent != "schema-server" {
+		t.Fatalf("FailedComponent = %q, want schema-server", detail.FailedComponent)
+	}
+}
+
+func TestExpectedDeployedImageRefsIncludesRuntimeAndChecksumRefs(t *testing.T) {
+	refs, err := expectedDeployedImageRefs("registry.example.com/project", &layout.PackageLayout{
+		Pkg: zarfapi.ZarfPackage{
+			Components: []zarfapi.ZarfComponent{
+				{
+					Name: "images",
+					Images: []string{
+						"ghcr.io/example/schema-server:2.5.0",
+						"ghcr.io/example/schema-server:2.5.0",
+					},
+				},
+				{
+					Name:   "zarf-agent",
+					Images: []string{"ghcr.io/example/zarf-agent:v1"},
+				},
+			},
+		},
+	}, state.RegistryInfo{Address: "registry.example.com/project"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(refs) != 3 {
+		t.Fatalf("expected 3 unique refs, got %d: %v", len(refs), refs)
+	}
+	if refs[0].component != "images" {
+		t.Fatalf("component for runtime ref = %q", refs[0].component)
+	}
+	if refs[0].ref != "registry.example.com/project/example/schema-server:2.5.0" {
+		t.Fatalf("runtime ref = %q", refs[0])
+	}
+	if refs[1].component != "images" {
+		t.Fatalf("component for checksum ref = %q", refs[1].component)
+	}
+	if !strings.HasPrefix(refs[1].ref, "registry.example.com/project/example/schema-server:2.5.0-zarf-") {
+		t.Fatalf("checksum ref = %q", refs[1])
+	}
+	if refs[2].component != "zarf-agent" {
+		t.Fatalf("component for agent ref = %q", refs[2].component)
+	}
+	if refs[2].ref != "registry.example.com/project/example/zarf-agent:v1" {
+		t.Fatalf("agent ref = %q", refs[2])
+	}
+}
+
+func TestExpectedDeployedImageRefsSkipsExternalInitBootstrapImages(t *testing.T) {
+	refs, err := expectedDeployedImageRefs("registry.example.com/project", &layout.PackageLayout{
+		Pkg: zarfapi.ZarfPackage{
+			Kind: zarfapi.ZarfInitConfig,
+			Components: []zarfapi.ZarfComponent{
+				{Name: "zarf-seed-registry", Images: []string{"ghcr.io/example/seed:v1"}},
+				{Name: "zarf-injector", Images: []string{"ghcr.io/example/injector:v1"}},
+				{Name: "zarf-registry", Images: []string{"ghcr.io/example/registry:v1"}},
+			},
+		},
+	}, state.RegistryInfo{
+		Address:      "registry.example.com/project",
+		RegistryMode: state.RegistryModeExternal,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expected external init bootstrap images to be skipped, got %v", refs)
+	}
+}
+
+func TestResolveRegistryImageFailsWhenTargetRegistryLacksImage(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		if r.URL.Path == "/v2/" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer registry.Close()
+
+	ref := strings.TrimPrefix(registry.URL, "http://") + "/internal/jade-crossplane/schema-server:2.5.0"
+	err := resolveRegistryImage(context.Background(), ref, state.RegistryInfo{}, packager.DeployOptions{
+		RemoteOptions: packager.RemoteOptions{PlainHTTP: true},
+	})
+	if err == nil {
+		t.Fatalf("expected missing image resolve to fail")
+	}
+	if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected not found error, got %v", err)
+	}
+}
+
+func TestResolveRegistryImageProbesLocalHTTPSBeforePlainHTTP(t *testing.T) {
+	registry := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		if r.URL.Path == "/v2/" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer registry.Close()
+
+	ref := strings.TrimPrefix(registry.URL, "https://") + "/internal/jade-crossplane/schema-server:2.5.0"
+	err := resolveRegistryImage(context.Background(), ref, state.RegistryInfo{}, packager.DeployOptions{
+		RemoteOptions: packager.RemoteOptions{InsecureSkipTLSVerify: true},
+	})
+	if err == nil {
+		t.Fatalf("expected missing image resolve to fail")
+	}
+	if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected HTTPS registry to be probed before plain HTTP, got %v", err)
+	}
+}
+
+func TestResolveRegistryImageUsesPullCredentials(t *testing.T) {
+	authSeen := false
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		if r.URL.Path == "/v2/" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			username, password, ok := r.BasicAuth()
+			if !ok {
+				w.Header().Set("WWW-Authenticate", `Basic realm="test-registry"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if username != "pull-user" || password != "pull-pass" {
+				http.Error(w, "bad credentials", http.StatusForbidden)
+				return
+			}
+			authSeen = true
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer registry.Close()
+
+	ref := strings.TrimPrefix(registry.URL, "http://") + "/internal/jade-crossplane/schema-server:2.5.0"
+	err := resolveRegistryImage(context.Background(), ref, state.RegistryInfo{
+		PullUsername: "pull-user",
+		PullPassword: "pull-pass",
+	}, packager.DeployOptions{
+		RemoteOptions: packager.RemoteOptions{PlainHTTP: true},
+	})
+	if err == nil {
+		t.Fatalf("expected missing image resolve to fail")
+	}
+	if !authSeen {
+		t.Fatalf("expected resolver to retry manifest request with pull credentials")
+	}
+	if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") {
+		t.Fatalf("expected credentials to be accepted before missing image error, got %v", err)
+	}
+}
+
+func TestResolveRegistryImageTimesOutWaitingForHeaders(t *testing.T) {
+	oldTimeout := registryResolveResponseHeaderTimeout
+	registryResolveResponseHeaderTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		registryResolveResponseHeaderTimeout = oldTimeout
+	})
+
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Second)
+	}))
+	defer registry.Close()
+
+	ref := strings.TrimPrefix(registry.URL, "http://") + "/internal/jade-crossplane/schema-server:2.5.0"
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := resolveRegistryImage(ctx, ref, state.RegistryInfo{}, packager.DeployOptions{
+		RemoteOptions: packager.RemoteOptions{PlainHTTP: true},
+	})
+	if err == nil {
+		t.Fatalf("expected stalled registry resolve to fail")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("expected resolve to fail quickly from response header timeout, took %s: %v", elapsed, err)
+	}
+	if !strings.Contains(err.Error(), "timeout awaiting response headers") &&
+		!strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected timeout-style error, got %v", err)
+	}
+}
+
+func TestVerifyDeployedPackageImagesAgainstK3DExternalRegistryMissingImage(t *testing.T) {
+	if os.Getenv("ZARF_OPERATOR_K3D_REGISTRY_TEST") != "1" {
+		t.Skip("set ZARF_OPERATOR_K3D_REGISTRY_TEST=1 and ZARF_OPERATOR_K3D_CONTEXT with a disposable k3d context to run")
+	}
+	requireDisposableK3DContext(t)
+
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		if r.URL.Path == "/v2/" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer registry.Close()
+
+	pkgLayout := &layout.PackageLayout{
+		Pkg: zarfapi.ZarfPackage{
+			Metadata: zarfapi.ZarfMetadata{Name: "crossplane-extras", Version: "1.10.25"},
+			Components: []zarfapi.ZarfComponent{
+				{
+					Name:   "crossplane-functions",
+					Images: []string{"registry.jadeuc.com/internal/jade-crossplane/schema-server:2.5.0"},
+				},
+			},
+		},
+	}
+
+	err := verifyDeployedPackageImages(context.Background(), pkgLayout, packager.DeployOptions{
+		RegistryInfo: state.RegistryInfo{
+			Address:      strings.TrimPrefix(registry.URL, "http://"),
+			RegistryMode: state.RegistryModeExternal,
+		},
+		RemoteOptions: packager.RemoteOptions{PlainHTTP: true},
+	})
+	if err == nil {
+		t.Fatalf("expected missing target image verification failure")
+	}
+	var verificationErr *imageVerificationError
+	if !errors.As(err, &verificationErr) {
+		t.Fatalf("expected imageVerificationError, got %T: %v", err, err)
+	}
+	if verificationErr.component != "crossplane-functions" {
+		t.Fatalf("component = %q, want crossplane-functions", verificationErr.component)
+	}
+	if !strings.Contains(verificationErr.ref, "schema-server:2.5.0") {
+		t.Fatalf("missing image ref should name schema-server:2.5.0, got %q", verificationErr.ref)
+	}
+}
+
+func requireDisposableK3DContext(t *testing.T) {
+	t.Helper()
+
+	wantContext := os.Getenv("ZARF_OPERATOR_K3D_CONTEXT")
+	if strings.TrimSpace(wantContext) == "" {
+		t.Fatalf("ZARF_OPERATOR_K3D_CONTEXT must name the disposable k3d context")
+	}
+	if !strings.HasPrefix(wantContext, "k3d-") {
+		t.Fatalf("ZARF_OPERATOR_K3D_CONTEXT must be a k3d context, got %q", wantContext)
+	}
+
+	config, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
+	if err != nil {
+		t.Fatalf("load kubeconfig: %v", err)
+	}
+	if config.CurrentContext != wantContext {
+		t.Fatalf("current kube context = %q, want disposable test context %q", config.CurrentContext, wantContext)
+	}
+
+	clusterClient, err := cluster.New(context.Background())
+	if err != nil {
+		t.Fatalf("connect to disposable k3d context %q: %v", wantContext, err)
+	}
+	if _, err := clusterClient.LoadState(context.Background()); err == nil {
+		t.Fatalf("current context %q already has zarf-state; use an empty disposable k3d cluster", wantContext)
+	}
+}
+
+func TestIsLocalRegistryHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{host: "127.0.0.1:5000", want: true},
+		{host: "[::1]:5000", want: true},
+		{host: "localhost", want: true},
+		{host: "registry.example.com", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := isLocalRegistryHost(tc.host); got != tc.want {
+				t.Fatalf("isLocalRegistryHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestClassifyDeployError(t *testing.T) {

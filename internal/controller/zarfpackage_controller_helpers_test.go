@@ -52,6 +52,24 @@ func TestUniqueChartRefsDeduplicates(t *testing.T) {
 	}
 }
 
+func TestHasFailedDeployedComponentDetectsFailedChart(t *testing.T) {
+	deployedPkg := &zarf.PackageInfo{
+		DeployedComponents: []zarf.DeployedComponent{
+			{
+				Name:   "helm",
+				Status: zarf.ComponentStatusSucceeded,
+				InstalledCharts: []zarf.InstalledChart{
+					{Namespace: "crossplane", ChartName: "jadeuc-function-helm", Status: zarf.ChartStatusFailed},
+				},
+			},
+		},
+	}
+
+	if !hasFailedDeployedComponent(deployedPkg) {
+		t.Fatal("expected failed chart to require redeploy")
+	}
+}
+
 func TestRetryDeployAfterHelmRecovery(t *testing.T) {
 	deployCalls := 0
 	fakeZarf := fake.New().WithDeployFunc(func(context.Context, zarf.DeployOptions) (*zarf.DeployResult, error) {
@@ -215,7 +233,7 @@ func TestMarkFailedComponentStatusAppendsWhenMissing(t *testing.T) {
 	}
 }
 
-func TestMarkFailedComponentStatusReplacesExistingComponent(t *testing.T) {
+func TestMarkFailedComponentStatusMergesFailedChartEvidence(t *testing.T) {
 	r := &ZarfPackageReconciler{}
 	pkg := &opsv1alpha1.ZarfPackage{
 		ObjectMeta: metav1.ObjectMeta{Name: "pkg", Namespace: "default"},
@@ -247,10 +265,58 @@ func TestMarkFailedComponentStatusReplacesExistingComponent(t *testing.T) {
 	if got.Status != string(zarf.ComponentStatusFailed) {
 		t.Fatalf("expected component status failed, got %q", got.Status)
 	}
-	if len(got.InstalledCharts) != 1 {
-		t.Fatalf("expected chart info to be replaced, got %d charts", len(got.InstalledCharts))
+	if len(got.InstalledCharts) != 2 {
+		t.Fatalf("expected existing chart info plus reported failed chart, got %d charts", len(got.InstalledCharts))
 	}
-	if got.InstalledCharts[0].Namespace != "apps" || got.InstalledCharts[0].ChartName != "new-chart" {
-		t.Fatalf("unexpected replaced chart status: %+v", got.InstalledCharts[0])
+	if got.InstalledCharts[0].Namespace != "old-ns" || got.InstalledCharts[0].ChartName != "old-chart" {
+		t.Fatalf("unexpected preserved chart status: %+v", got.InstalledCharts[0])
+	}
+	if got.InstalledCharts[1].Namespace != "apps" || got.InstalledCharts[1].ChartName != "new-chart" {
+		t.Fatalf("unexpected merged failed chart status: %+v", got.InstalledCharts[1])
+	}
+	if got.InstalledCharts[1].Status != string(zarf.ChartStatusFailed) {
+		t.Fatalf("expected merged chart to be failed, got %q", got.InstalledCharts[1].Status)
+	}
+}
+
+func TestMarkFailedComponentStatusMarksExistingNamedChartFailed(t *testing.T) {
+	r := &ZarfPackageReconciler{}
+	pkg := &opsv1alpha1.ZarfPackage{
+		ObjectMeta: metav1.ObjectMeta{Name: "pkg", Namespace: "default"},
+		Spec:       opsv1alpha1.ZarfPackageSpec{Namespace: "apps"},
+		Status: opsv1alpha1.ZarfPackageStatus{
+			ComponentStatuses: []opsv1alpha1.ComponentStatus{
+				{
+					Name:   "alpha",
+					Status: string(zarf.ComponentStatusSucceeded),
+					InstalledCharts: []opsv1alpha1.InstalledChartStatus{
+						{Namespace: "actual-ns", ChartName: "alpha-chart", Status: string(zarf.ChartStatusSucceeded)},
+					},
+				},
+			},
+		},
+	}
+
+	r.markFailedComponentStatus(pkg, &zarf.DeployError{
+		Err:             errors.New("deploy failed"),
+		FailedComponent: "alpha",
+		FailedChart:     "alpha-chart",
+	})
+
+	if len(pkg.Status.ComponentStatuses) != 1 {
+		t.Fatalf("expected existing component to remain in-place, got %d entries", len(pkg.Status.ComponentStatuses))
+	}
+	got := pkg.Status.ComponentStatuses[0]
+	if got.Status != string(zarf.ComponentStatusFailed) {
+		t.Fatalf("expected component status failed, got %q", got.Status)
+	}
+	if len(got.InstalledCharts) != 1 {
+		t.Fatalf("expected one existing chart, got %d charts", len(got.InstalledCharts))
+	}
+	if got.InstalledCharts[0].Namespace != "actual-ns" || got.InstalledCharts[0].ChartName != "alpha-chart" {
+		t.Fatalf("unexpected chart identity: %+v", got.InstalledCharts[0])
+	}
+	if got.InstalledCharts[0].Status != string(zarf.ChartStatusFailed) {
+		t.Fatalf("expected existing named chart to be marked failed, got %q", got.InstalledCharts[0].Status)
 	}
 }
