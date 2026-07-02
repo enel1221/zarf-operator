@@ -106,6 +106,18 @@ func TestDeployReturnsResourceExhaustedWhenRemoveActive(t *testing.T) {
 	}
 }
 
+func TestPackageMetadataLoadOptionsUsesConfiguredCachePath(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("ZARF_CACHE_PATH", cacheDir)
+
+	s := NewZarfServer(nil, logger.Config{}, "test")
+
+	opts := s.packageMetadataLoadOptions()
+	if opts.CachePath != cacheDir {
+		t.Fatalf("metadata cache path = %q, want %q", opts.CachePath, cacheDir)
+	}
+}
+
 func TestDeployCancelsPreviousDeploy(t *testing.T) {
 	s, cancelled := simulateActiveDeploy(t)
 

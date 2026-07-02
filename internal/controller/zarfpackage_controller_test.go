@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
@@ -96,11 +97,34 @@ func (c *lookupCountingClient) Close() error {
 	return c.delegate.Close()
 }
 
+type fakeOCITagResolver struct {
+	tags         []string
+	err          error
+	calls        int
+	sources      []string
+	capturedOpts []ociTagResolveOptions
+}
+
+func (r *fakeOCITagResolver) ListTags(_ context.Context, source string, opts ociTagResolveOptions) ([]string, error) {
+	r.calls++
+	r.sources = append(r.sources, source)
+	r.capturedOpts = append(r.capturedOpts, opts)
+	return append([]string{}, r.tags...), r.err
+}
+
 var _ = Describe("ZarfPackage Controller", func() {
 	ctx := context.Background()
 	const (
 		testPackageName     = "pkg"
 		packageNameToRemove = "pkg-to-remove"
+
+		autoUpgradeBaseVersion  = "1.0.0"
+		autoUpgradeNextVersion  = "1.1.0"
+		autoUpgradeNewerVersion = "1.2.0"
+		autoUpgradeBaseSource   = "oci://registry.example.com/team/pkg:" + autoUpgradeBaseVersion
+		autoUpgradeNextSource   = "oci://registry.example.com/team/pkg:" + autoUpgradeNextVersion
+		autoUpgradeNewerSource  = "oci://registry.example.com/team/pkg:" + autoUpgradeNewerVersion
+		autoUpgradeOtherSource  = "oci://registry.example.com/other/pkg:" + autoUpgradeBaseVersion
 	)
 
 	newReconciler := func(zc zarf.Client) *ZarfPackageReconciler {
@@ -303,6 +327,648 @@ var _ = Describe("ZarfPackage Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 		})
 
+		It("should auto-upgrade to the newest semver tag without mutating spec source", func() {
+			nn := createResource("auto-upgrade-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.PlainHTTP = true
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1m",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNextVersion, Generation: 2}, nil
+				})
+			resolver := &fakeOCITagResolver{tags: []string{
+				"latest",
+				autoUpgradeBaseVersion,
+				"1.0.1",
+				"2.0.0-alpha.1",
+				autoUpgradeNextVersion,
+			}}
+
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+			Expect(deployCalled).To(Equal(1))
+			Expect(deployedSource).To(Equal(autoUpgradeNextSource))
+			Expect(resolver.calls).To(Equal(1))
+			Expect(resolver.sources).To(Equal([]string{autoUpgradeBaseSource}))
+			Expect(resolver.capturedOpts).To(HaveLen(1))
+			Expect(resolver.capturedOpts[0].PlainHTTP).To(BeTrue())
+
+			updated := getResource(nn)
+			Expect(updated.Spec.Source).To(Equal(autoUpgradeBaseSource))
+			Expect(updated.Status.Source).To(Equal(autoUpgradeNextSource))
+			Expect(updated.Status.DeployedVersion).To(Equal(autoUpgradeNextVersion))
+			Expect(updated.Status.AvailableVersion).To(BeEmpty())
+			Expect(updated.Status.AvailableSource).To(BeEmpty())
+			Expect(updated.Status.LastUpgradeCheckTime).NotTo(BeNil())
+			Expect(updated.Status.LastAttemptedRevision).To(Equal(autoUpgradeNextSource))
+			upgradeAvailable := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeUpgradeAvailable)
+			Expect(upgradeAvailable).NotTo(BeNil())
+			Expect(upgradeAvailable.Status).To(Equal(metav1.ConditionFalse))
+		})
+
+		It("should keep the auto-upgraded source when non-source deployment fields change", func() {
+			nn := createResource("auto-upgrade-spec-change-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1m",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeNextVersion
+			obj.Status.Source = autoUpgradeNextSource
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Spec.Set = []string{"REPLICAS=2"}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeNextVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNextVersion, Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployedSource).To(Equal(autoUpgradeNextSource))
+
+			updated := getResource(nn)
+			Expect(updated.Spec.Source).To(Equal(autoUpgradeBaseSource))
+			Expect(updated.Status.Source).To(Equal(autoUpgradeNextSource))
+		})
+
+		It("should deploy a pending discovered upgrade before the next poll interval", func() {
+			nn := createResource("auto-upgrade-pending-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.Now()
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNextVersion, Generation: 2}, nil
+				})
+			resolver := &fakeOCITagResolver{tags: []string{autoUpgradeBaseVersion}}
+
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Hour))
+			Expect(deployCalled).To(Equal(1))
+			Expect(deployedSource).To(Equal(autoUpgradeNextSource))
+			Expect(resolver.calls).To(Equal(0))
+		})
+
+		It("should ignore stale pending upgrades that violate the current semver constraint", func() {
+			nn := createResource("auto-upgrade-stale-pending-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:          true,
+				Strategy:         opsv1alpha1.UpgradeStrategySemVer,
+				Interval:         "1h",
+				SemverConstraint: "~1.0",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.Now()
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.ObservedGeneration = obj.Generation
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNextVersion, Generation: 2}, nil
+				})
+			resolver := &fakeOCITagResolver{tags: []string{autoUpgradeBaseVersion, autoUpgradeNextVersion}}
+
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically("<=", time.Hour))
+			Expect(result.RequeueAfter).To(BeNumerically(">", time.Hour-time.Minute))
+			Expect(deployCalled).To(Equal(0))
+			Expect(resolver.calls).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.AvailableSource).To(BeEmpty())
+			Expect(updated.Status.AvailableVersion).To(BeEmpty())
+			upgradeAvailable := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeUpgradeAvailable)
+			Expect(upgradeAvailable).NotTo(BeNil())
+			Expect(upgradeAvailable.Status).To(Equal(metav1.ConditionFalse))
+			Expect(upgradeAvailable.Reason).To(Equal(ReasonUpgradeNotAvailable))
+		})
+
+		It("should ignore a stale pending upgrade when spec source changes repositories", func() {
+			nn := createResource("auto-upgrade-source-repo-change-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.Now()
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Spec.Source = autoUpgradeOtherSource
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeBaseVersion, Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployedSource).To(Equal(autoUpgradeOtherSource))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Source).To(Equal(autoUpgradeOtherSource))
+			Expect(updated.Status.AvailableSource).To(BeEmpty())
+			Expect(updated.Status.AvailableVersion).To(BeEmpty())
+			upgradeAvailable := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeUpgradeAvailable)
+			Expect(upgradeAvailable).NotTo(BeNil())
+			Expect(upgradeAvailable.Status).To(Equal(metav1.ConditionFalse))
+			Expect(upgradeAvailable.Reason).To(Equal(ReasonUpgradeNotAvailable))
+		})
+
+		It("should clear discovered upgrade status when auto-upgrades are disabled", func() {
+			nn := createResource("auto-upgrade-disabled-clears-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.Now()
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.Conditions = append(obj.Status.Conditions, metav1.Condition{
+				Type:               string(opsv1alpha1.ConditionTypeUpgradeAvailable),
+				Status:             metav1.ConditionTrue,
+				Reason:             ReasonUpgradeAvailable,
+				Message:            "Discovered newer package source oci://registry.example.com/team/pkg:1.1.0",
+				ObservedGeneration: obj.Generation,
+				LastTransitionTime: metav1.Now(),
+			})
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{Enabled: false}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			deployCalled := 0
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployCalled++
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeBaseVersion, Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployCalled).To(Equal(0))
+
+			updated := getResource(nn)
+			Expect(updated.Status.AvailableSource).To(BeEmpty())
+			Expect(updated.Status.AvailableVersion).To(BeEmpty())
+			Expect(updated.Status.LastUpgradeCheckTime).To(BeNil())
+			upgradeAvailable := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeUpgradeAvailable)
+			Expect(upgradeAvailable).NotTo(BeNil())
+			Expect(upgradeAvailable.Status).To(Equal(metav1.ConditionFalse))
+			Expect(upgradeAvailable.Reason).To(Equal(ReasonUpgradeNotAvailable))
+		})
+
+		It("should preserve the deployed auto-upgraded source when policy is disabled and non-source fields change", func() {
+			nn := createResource("auto-upgrade-disable-freeze-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeNextVersion
+			obj.Status.Source = autoUpgradeNextSource
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{Enabled: false}
+			obj.Spec.Set = []string{"REPLICAS=2"}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeNextVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNextVersion, Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployedSource).To(Equal(autoUpgradeNextSource))
+
+			updated := getResource(nn)
+			Expect(updated.Spec.Source).To(Equal(autoUpgradeBaseSource))
+			Expect(updated.Status.Source).To(Equal(autoUpgradeNextSource))
+		})
+
+		It("should deploy the pinned source on explicit redeploy when policy is disabled", func() {
+			nn := createResource("auto-upgrade-disable-redeploy-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{Enabled: false}
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeNextVersion
+			obj.Status.Source = autoUpgradeNextSource
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Annotations = map[string]string{AnnotationRedeploy: "rollback"}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeNextVersion, Generation: 1}, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeBaseVersion, Generation: 2}, nil
+				})
+
+			reconciler := newReconciler(fakeZarf)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployedSource).To(Equal(autoUpgradeBaseSource))
+		})
+
+		It("should retry a failed pending upgrade source instead of falling back to the pinned source", func() {
+			nn := createResource("auto-upgrade-failed-pending-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.Now()
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastAttemptedRevision = autoUpgradeNextSource
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNextVersion, Generation: 2}, nil
+				})
+			reconciler := newReconciler(fakeZarf)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(deployedSource).To(Equal(autoUpgradeNextSource))
+		})
+
+		It("should replace a failed pending upgrade with a newer semver tag after the poll interval", func() {
+			nn := createResource("auto-upgrade-failed-pending-newer-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1m",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastAttemptedRevision = autoUpgradeNextSource
+			obj.Status.LastAttemptError = "deploy failed"
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeNewerVersion, Generation: 2}, nil
+				})
+			resolver := &fakeOCITagResolver{tags: []string{autoUpgradeBaseVersion, autoUpgradeNextVersion, autoUpgradeNewerVersion}}
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resolver.calls).To(Equal(1))
+			Expect(deployedSource).To(Equal(autoUpgradeNewerSource))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Source).To(Equal(autoUpgradeNewerSource))
+			Expect(updated.Status.AvailableVersion).To(BeEmpty())
+			Expect(updated.Status.AvailableSource).To(BeEmpty())
+			Expect(updated.Status.LastAttemptedRevision).To(Equal(autoUpgradeNewerSource))
+		})
+
+		It("should clear a failed pending upgrade when no eligible tag remains after the poll interval", func() {
+			nn := createResource("auto-upgrade-failed-pending-gone-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1m",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.AvailableVersion = autoUpgradeNextVersion
+			obj.Status.AvailableSource = autoUpgradeNextSource
+			obj.Status.LastAttemptedRevision = autoUpgradeNextSource
+			obj.Status.LastAttemptError = "deploy failed"
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			var deployedSource string
+			fakeZarf := fake.New().
+				WithGetDeployedPackage(nil, nil).
+				WithDeployFunc(func(_ context.Context, opts zarf.DeployOptions) (*zarf.DeployResult, error) {
+					deployedSource = opts.Source
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeBaseVersion, Generation: 2}, nil
+				})
+			resolver := &fakeOCITagResolver{tags: []string{autoUpgradeBaseVersion}}
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fakeZarf,
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resolver.calls).To(Equal(1))
+			Expect(deployedSource).To(Equal(autoUpgradeBaseSource))
+
+			updated := getResource(nn)
+			Expect(updated.Status.Source).To(Equal(autoUpgradeBaseSource))
+			Expect(updated.Status.AvailableVersion).To(BeEmpty())
+			Expect(updated.Status.AvailableSource).To(BeEmpty())
+			Expect(updated.Status.LastAttemptedRevision).To(Equal(autoUpgradeBaseSource))
+			upgradeCondition := apimeta.FindStatusCondition(updated.Status.Conditions, string(opsv1alpha1.ConditionTypeUpgradeAvailable))
+			Expect(upgradeCondition).NotTo(BeNil())
+			Expect(upgradeCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(upgradeCondition.Reason).To(Equal(ReasonUpgradeNotAvailable))
+		})
+
+		It("should not consume the poll interval when an upgrade check fails", func() {
+			nn := createResource("auto-upgrade-check-fail-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			resolver := &fakeOCITagResolver{err: fmt.Errorf("registry unavailable")}
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fake.New().WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil),
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+			Expect(resolver.calls).To(Equal(1))
+
+			updated := getResource(nn)
+			Expect(updated.Status.LastUpgradeCheckTime).To(BeNil())
+			upgradeAvailable := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeUpgradeAvailable)
+			Expect(upgradeAvailable).NotTo(BeNil())
+			Expect(upgradeAvailable.Status).To(Equal(metav1.ConditionFalse))
+			Expect(upgradeAvailable.Reason).To(Equal(ReasonUpgradeCheckFailed))
+		})
+
+		It("should recheck upgrades when only upgrade policy generation changes", func() {
+			nn := createResource("auto-upgrade-policy-generation-pkg", true, autoUpgradeBaseSource)
+
+			obj := getResource(nn)
+			obj.Spec.UpgradePolicy = &opsv1alpha1.UpgradePolicy{
+				Enabled:  true,
+				Strategy: opsv1alpha1.UpgradeStrategySemVer,
+				Interval: "1h",
+			}
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			lastCheck := metav1.NewTime(time.Now().Add(-10 * time.Second))
+			obj.Status.PackageName = testPackageName
+			obj.Status.DeployedVersion = autoUpgradeBaseVersion
+			obj.Status.Source = obj.Spec.Source
+			obj.Status.LastUpgradeCheckTime = &lastCheck
+			obj.Status.DeployedSpecHash = obj.Spec.DeploymentHash()
+			obj.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
+			obj.Status.ObservedGeneration = obj.Generation
+			Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+
+			obj = getResource(nn)
+			obj.Spec.UpgradePolicy.SemverConstraint = "~1.0"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+			resolver := &fakeOCITagResolver{tags: []string{autoUpgradeBaseVersion}}
+			reconciler := &ZarfPackageReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				ZarfClient:      fake.New().WithGetDeployedPackage(&zarf.PackageInfo{Name: testPackageName, Version: autoUpgradeBaseVersion, Generation: 1}, nil),
+				RequeueInterval: 5 * time.Minute,
+				OCITagResolver:  resolver,
+				recorder:        record.NewFakeRecorder(100),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Hour))
+			Expect(resolver.calls).To(Equal(1))
+
+			updated := getResource(nn)
+			Expect(updated.Status.LastUpgradeCheckTime).NotTo(BeNil())
+			Expect(updated.Status.LastUpgradeCheckTime.Time).To(BeTemporally(">", lastCheck.Time))
+			upgradeAvailable := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeUpgradeAvailable)
+			Expect(upgradeAvailable).NotTo(BeNil())
+			Expect(upgradeAvailable.Status).To(Equal(metav1.ConditionFalse))
+			Expect(upgradeAvailable.Reason).To(Equal(ReasonUpgradeNotAvailable))
+		})
+
 		It("should set failed status and requeue on deploy error", func() {
 			nn := createResource("deploy-fail-pkg", true, "oci://example.com/pkg:v1")
 
@@ -319,7 +985,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 
 			updated := getResource(nn)
 			Expect(updated.Status.Phase).To(Equal(opsv1alpha1.ZarfPackagePhaseFailed))
-			Expect(updated.Status.PackageName).To(Equal(testPackageName))
+			Expect(updated.Status.PackageName).To(BeEmpty())
 			Expect(updated.Status.LastAttemptedRevision).To(Equal("oci://example.com/pkg:v1"))
 			Expect(updated.Status.LastAttemptError).To(ContainSubstring("connection refused"))
 			ready := findCondition(updated.Status.Conditions, opsv1alpha1.ConditionTypeReady)
@@ -713,7 +1379,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			fakeZarf := fake.New().
 				WithGetDeployedPackage(&zarf.PackageInfo{
 					Name:       testPackageName,
-					Version:    "1.0.0",
+					Version:    autoUpgradeBaseVersion,
 					Generation: 1,
 					DeployedComponents: []zarf.DeployedComponent{
 						{
@@ -727,7 +1393,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 				}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: testPackageName, Version: "1.0.0", Generation: 2}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeBaseVersion, Generation: 2}, nil
 				})
 
 			rec := record.NewFakeRecorder(100)
@@ -780,7 +1446,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 			fakeZarf := fake.New().
 				WithGetDeployedPackage(&zarf.PackageInfo{
 					Name:       testPackageName,
-					Version:    "1.0.0",
+					Version:    autoUpgradeBaseVersion,
 					Generation: 1,
 					DeployedComponents: []zarf.DeployedComponent{
 						{
@@ -794,7 +1460,7 @@ var _ = Describe("ZarfPackage Controller", func() {
 				}, nil).
 				WithDeployFunc(func(_ context.Context, _ zarf.DeployOptions) (*zarf.DeployResult, error) {
 					deployCalled++
-					return &zarf.DeployResult{PackageName: testPackageName, Version: "1.0.0", Generation: 2}, nil
+					return &zarf.DeployResult{PackageName: testPackageName, Version: autoUpgradeBaseVersion, Generation: 2}, nil
 				})
 
 			reconciler := newReconciler(fakeZarf)

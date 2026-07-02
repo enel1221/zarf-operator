@@ -44,11 +44,31 @@ var (
 	// registryURL is the in-cluster registry address used in ZarfPackage CRs.
 	// The registry is deployed as a NodePort service in the e2e-registry namespace.
 	registryURL = "registry.e2e-registry.svc.cluster.local:5000"
+	// registryHostURL is the host-facing endpoint used by tests to publish
+	// packages into the same in-cluster registry.
+	registryHostURL = registryHostEndpoint("E2E_REGISTRY_HOST_PORT", "5001")
 
 	// authRegistryURL is the in-cluster auth-protected registry address.
 	// Credentials: testuser / testpass (htpasswd-based basic auth).
 	authRegistryURL = "registry-auth.e2e-registry-auth.svc.cluster.local:5000"
+	// authRegistryHostURL is the host-facing endpoint used by tests to publish
+	// packages into the same authenticated in-cluster registry.
+	authRegistryHostURL = registryHostEndpoint("E2E_AUTH_REGISTRY_HOST_PORT", "5002")
 )
+
+func registryHostEndpoint(portEnv, defaultPort string) string {
+	host := strings.TrimSpace(os.Getenv("E2E_REGISTRY_HOST"))
+	if host == "" {
+		host = "localhost"
+	}
+
+	port := strings.TrimSpace(os.Getenv(portEnv))
+	if port == "" {
+		port = defaultPort
+	}
+
+	return fmt.Sprintf("%s:%s", host, port)
+}
 
 // TestE2E runs the end-to-end (e2e) test suite for the project.
 func TestE2E(t *testing.T) {

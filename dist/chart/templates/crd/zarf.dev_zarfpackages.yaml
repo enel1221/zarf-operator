@@ -218,6 +218,7 @@ spec:
                 type: boolean
               source:
                 description: Source is the location of the Zarf package OCI
+                maxLength: 2048
                 type: string
               suspend:
                 default: false
@@ -249,6 +250,39 @@ spec:
               tmpdir:
                 description: Tmpdir is the temporary directory for the Zarf package.
                 type: string
+              upgradePolicy:
+                description: |-
+                  UpgradePolicy configures opt-in automatic upgrades for semantic-versioned
+                  OCI package sources.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled turns on automatic upgrade checks for this
+                      package.
+                    type: boolean
+                  interval:
+                    description: |-
+                      Interval controls how often the controller polls the OCI registry for
+                      newer tags. When omitted, the controller's global requeue interval is used.
+                      When set, the interval must parse as a Go duration and be at least 1m.
+                    maxLength: 32
+                    type: string
+                  semverConstraint:
+                    description: |-
+                      SemverConstraint optionally limits eligible tags, for example "~1.0" or
+                      ">=1.0.0 <2.0.0". Tags must still be newer than the currently deployed tag.
+                    maxLength: 256
+                    type: string
+                  strategy:
+                    default: SemVer
+                    description: |-
+                      Strategy selects the upgrade discovery strategy. SemVer lists OCI tags in
+                      the source repository and chooses the newest stable semantic version newer
+                      than the currently deployed source tag.
+                    enum:
+                    - SemVer
+                    type: string
+                type: object
               yolo:
                 description: |-
                   Yolo enables YOLO mode - deploy without requiring 'zarf init'.
@@ -261,9 +295,28 @@ spec:
             required:
             - source
             type: object
+            x-kubernetes-validations:
+            - message: upgradePolicy.enabled requires spec.source to be an OCI source
+                with an explicit semantic version tag
+              rule: '!has(self.upgradePolicy) || !has(self.upgradePolicy.enabled)
+                || self.upgradePolicy.enabled == false || (self.source.startsWith(''oci://'')
+                && !self.source.contains(''@'') && self.source.matches(''^oci://.+:v?(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?$''))'
+            - message: upgradePolicy.interval must be empty or a valid duration at
+                least 1 minute
+              rule: '!has(self.upgradePolicy) || !has(self.upgradePolicy.interval)
+                || self.upgradePolicy.interval.matches(''^$'') || (self.upgradePolicy.interval.matches(''^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$'')
+                && duration(self.upgradePolicy.interval) >= duration(''1m''))'
           status:
             description: ZarfPackageStatus defines the observed state of ZarfPackage.
             properties:
+              availableSource:
+                description: AvailableSource is the OCI source for AvailableVersion.
+                type: string
+              availableVersion:
+                description: |-
+                  AvailableVersion is the newest semantic package version discovered by the
+                  upgrade policy.
+                type: string
               componentStatuses:
                 description: ComponentStatuses tracks the status of each deployed
                   component
@@ -422,6 +475,12 @@ spec:
                 type: string
               lastReconcileTime:
                 description: LastReconcileTime is when the package was last reconciled
+                format: date-time
+                type: string
+              lastUpgradeCheckTime:
+                description: |-
+                  LastUpgradeCheckTime is when the upgrade policy last checked the source
+                  registry for newer tags.
                 format: date-time
                 type: string
               observedGeneration:

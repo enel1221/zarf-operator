@@ -623,7 +623,7 @@ func (s *ZarfServer) GetPackageMetadata(
 		return nil, status.Error(codes.InvalidArgument, "source is required")
 	}
 
-	loadOpts := packager.LoadOptions{}
+	loadOpts := s.packageMetadataLoadOptions()
 	pkgLayout, err := packager.LoadPackage(ctx, req.Source, loadOpts)
 	if err != nil {
 		log.Error("failed to load package metadata", "error", err, "source", req.Source)
@@ -649,6 +649,12 @@ func (s *ZarfServer) GetPackageMetadata(
 			Architecture: pkgLayout.Pkg.Build.Architecture,
 		},
 	}, nil
+}
+
+func (s *ZarfServer) packageMetadataLoadOptions() packager.LoadOptions {
+	return packager.LoadOptions{
+		CachePath: s.cachePath,
+	}
 }
 
 func (s *ZarfServer) Health(ctx context.Context, req *zarfv1.HealthRequest) (*zarfv1.HealthResponse, error) {

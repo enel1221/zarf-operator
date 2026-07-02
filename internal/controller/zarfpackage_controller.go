@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -81,6 +82,7 @@ const (
 	backoffMaxJitter            = 5 * time.Second
 	dependencyRequeue           = 10 * time.Second
 	sidecarBusyRequeue          = 10 * time.Second
+	upgradeCheckFailureRequeue  = time.Minute
 )
 
 // Condition reasons
@@ -102,6 +104,10 @@ const (
 	ReasonInvalidInitSecret    = "InvalidInitSecret"
 	ReasonHelmDebugLogs        = "HelmDebugLogs"
 	ReasonStalled              = "Stalled"
+	ReasonUpgradeAvailable     = "UpgradeAvailable"
+	ReasonUpgradeNotAvailable  = "UpgradeNotAvailable"
+	ReasonUpgradeCheckFailed   = "UpgradeCheckFailed"
+	ReasonUpgradeDeployed      = "UpgradeDeployed"
 )
 
 // Error definitions
@@ -152,6 +158,7 @@ type ZarfPackageReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	ZarfClient              zarf.Client
+	OCITagResolver          ociTagResolver
 	RequeueInterval         time.Duration
 	MaxConcurrentReconciles int
 	recorder                record.EventRecorder
@@ -329,9 +336,9 @@ func (r *ZarfPackageReconciler) reconcile(
 	}
 
 	// Determine if we need to deploy or update
-	needsDeploy := r.needsDeploy(ctx, zarfPkg, deployedPkg)
+	decision := r.deploymentDecision(ctx, log, zarfPkg, deployedPkg)
 
-	if needsDeploy {
+	if decision.needsDeploy {
 		if !dependenciesChecked {
 			dependenciesMet, notReadyDeps, depErr := r.checkDependencies(ctx, zarfPkg)
 			if depErr != nil {
@@ -343,7 +350,7 @@ func (r *ZarfPackageReconciler) reconcile(
 			}
 			r.markDependenciesMet(zarfPkg)
 		}
-		return r.deploy(ctx, log, zarfPkg, zarfClient, original)
+		return r.deploy(ctx, log, zarfPkg, zarfClient, original, decision.source)
 	}
 
 	// Package is deployed and in sync
@@ -355,13 +362,33 @@ func (r *ZarfPackageReconciler) reconcile(
 		ReasonDeployed, "Package is actively reconciling")
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
 
-	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+	return ctrl.Result{RequeueAfter: decision.requeueAfter}, nil
 }
 
-func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1alpha1.ZarfPackage, deployedPkg *zarf.PackageInfo) bool {
+type deploymentDecision struct {
+	needsDeploy  bool
+	source       string
+	requeueAfter time.Duration
+}
+
+func (r *ZarfPackageReconciler) deploymentDecision(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	deployedPkg *zarf.PackageInfo,
+) deploymentDecision {
+	pruneAutoUpgradeStatus(zarfPkg)
+
+	decision := deploymentDecision{
+		source:       r.deploymentSource(zarfPkg),
+		requeueAfter: r.requeueAfter(zarfPkg),
+	}
+
 	// Not deployed yet
 	if deployedPkg == nil {
-		return true
+		r.refreshFailedPendingAutoUpgrade(ctx, log, zarfPkg, &decision)
+		decision.needsDeploy = true
+		return decision
 	}
 
 	// Check for redeploy annotation
@@ -370,15 +397,20 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonRedeployRequested,
 				"Redeploy triggered via annotation")
 		}
-		return true
+		decision.needsDeploy = true
+		return decision
 	}
 
 	// Check for failed components that need retry
 	if hasFailedDeployedComponent(deployedPkg) {
-		return true
+		r.refreshFailedPendingAutoUpgrade(ctx, log, zarfPkg, &decision)
+		decision.needsDeploy = true
+		return decision
 	}
 	if zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseFailed {
-		return true
+		r.refreshFailedPendingAutoUpgrade(ctx, log, zarfPkg, &decision)
+		decision.needsDeploy = true
+		return decision
 	}
 
 	// Check if deployment-affecting fields changed (not syncPolicy, logLevel, etc.)
@@ -387,7 +419,17 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 			r.recorder.Event(zarfPkg, corev1.EventTypeNormal, "SpecChanged",
 				"Deployment-affecting spec fields changed, triggering redeploy")
 		}
-		return true
+		decision.needsDeploy = true
+		return decision
+	}
+
+	if upgradeDecision := r.evaluateAutoUpgrade(ctx, log, zarfPkg); upgradeDecision.checked {
+		decision.requeueAfter = upgradeDecision.requeueAfter
+		if upgradeDecision.source != "" {
+			decision.needsDeploy = true
+			decision.source = upgradeDecision.source
+			return decision
+		}
 	}
 
 	// Check for drift if SyncPolicy is Detect or Remediate
@@ -409,7 +451,8 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 				ReasonDriftDetected, fmt.Sprintf("Drift detected: %d missing releases", len(missingReleases)))
 
 			if zarfPkg.Spec.SyncPolicy == opsv1alpha1.SyncPolicyRemediate {
-				return true // Trigger redeploy
+				decision.needsDeploy = true
+				return decision
 			}
 		} else if zarfPkg.Status.DriftInfo != nil && zarfPkg.Status.DriftInfo.Detected {
 			// Clear drift if no longer detected
@@ -422,7 +465,30 @@ func (r *ZarfPackageReconciler) needsDeploy(ctx context.Context, zarfPkg *opsv1a
 				ReasonDriftResolved, "No drift detected")
 		}
 	}
-	return false
+	return decision
+}
+
+func (r *ZarfPackageReconciler) refreshFailedPendingAutoUpgrade(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+	decision *deploymentDecision,
+) {
+	if decision == nil || !shouldRefreshFailedPendingUpgrade(zarfPkg, decision.source, r.requeueAfter(zarfPkg)) {
+		return
+	}
+	upgradeDecision := r.evaluateAutoUpgrade(ctx, log, zarfPkg)
+	if !upgradeDecision.checked {
+		return
+	}
+	decision.requeueAfter = upgradeDecision.requeueAfter
+	if upgradeDecision.source != "" {
+		decision.source = upgradeDecision.source
+		return
+	}
+	if strings.TrimSpace(zarfPkg.Status.AvailableSource) == "" {
+		decision.source = currentSemverSource(zarfPkg)
+	}
 }
 
 func hasFailedDeployedComponent(deployedPkg *zarf.PackageInfo) bool {
@@ -500,6 +566,319 @@ func (r *ZarfPackageReconciler) deploymentSpecChanged(zarfPkg *opsv1alpha1.ZarfP
 		return true
 	}
 	return zarfPkg.Spec.DeploymentHash() != zarfPkg.Status.DeployedSpecHash
+}
+
+func (r *ZarfPackageReconciler) deploymentSource(zarfPkg *opsv1alpha1.ZarfPackage) string {
+	if zarfPkg == nil {
+		return ""
+	}
+	source := strings.TrimSpace(zarfPkg.Spec.Source)
+	if zarfPkg.Spec.UpgradePolicy == nil || !zarfPkg.Spec.UpgradePolicy.Enabled {
+		if _, ok := zarfPkg.Annotations[AnnotationRedeploy]; ok {
+			return source
+		}
+		if preferred, ok := preferredResolvedSemverSource(source, strings.TrimSpace(zarfPkg.Status.Source)); ok {
+			return preferred
+		}
+		return source
+	}
+	currentSource := currentSemverSource(zarfPkg)
+	if pendingSource, ok := pendingAvailableSemverSource(currentSource, zarfPkg.Status.AvailableSource, zarfPkg.Spec.UpgradePolicy.SemverConstraint); ok {
+		return pendingSource
+	}
+	return currentSource
+}
+
+func pruneAutoUpgradeStatus(zarfPkg *opsv1alpha1.ZarfPackage) {
+	if zarfPkg == nil {
+		return
+	}
+	policy := zarfPkg.Spec.UpgradePolicy
+	if policy == nil || !policy.Enabled {
+		condition := apimeta.FindStatusCondition(zarfPkg.Status.Conditions, string(opsv1alpha1.ConditionTypeUpgradeAvailable))
+		if strings.TrimSpace(zarfPkg.Status.AvailableSource) == "" &&
+			strings.TrimSpace(zarfPkg.Status.AvailableVersion) == "" &&
+			zarfPkg.Status.LastUpgradeCheckTime == nil &&
+			(condition == nil || condition.Status == metav1.ConditionFalse) {
+			return
+		}
+		clearAvailableUpgrade(zarfPkg, ReasonUpgradeNotAvailable, "Automatic package upgrades are disabled")
+		zarfPkg.Status.LastUpgradeCheckTime = nil
+		return
+	}
+	if availableSourceViolatesCurrentPolicy(currentSemverSource(zarfPkg), zarfPkg.Status.AvailableSource, policy.SemverConstraint) {
+		clearAvailableUpgrade(zarfPkg, ReasonUpgradeNotAvailable, "Previously discovered package source no longer matches the current upgrade policy")
+	}
+}
+
+func currentSemverSource(zarfPkg *opsv1alpha1.ZarfPackage) string {
+	if zarfPkg == nil {
+		return ""
+	}
+	source := strings.TrimSpace(zarfPkg.Spec.Source)
+	resolvedSource := strings.TrimSpace(zarfPkg.Status.Source)
+	if preferred, ok := preferredResolvedSemverSource(source, resolvedSource); ok {
+		return preferred
+	}
+	return source
+}
+
+func preferredResolvedSemverSource(source, resolvedSource string) (string, bool) {
+	sourceRef, err := parseOCISourceForTagList(source)
+	if err != nil {
+		return "", false
+	}
+	resolvedRef, err := parseOCISourceForTagList(resolvedSource)
+	if err != nil {
+		return "", false
+	}
+	if sourceRef.Repository != resolvedRef.Repository {
+		return "", false
+	}
+	sourceVersion, err := strictSemverVersion(sourceRef.Tag)
+	if err != nil {
+		return "", false
+	}
+	resolvedVersion, err := strictSemverVersion(resolvedRef.Tag)
+	if err != nil {
+		return "", false
+	}
+	if !resolvedVersion.GreaterThan(sourceVersion) {
+		return "", false
+	}
+	return strings.TrimSpace(resolvedSource), true
+}
+
+func pendingAvailableSemverSource(currentSource, availableSource, constraintExpr string) (string, bool) {
+	currentRef, err := parseOCISourceForTagList(currentSource)
+	if err != nil {
+		return "", false
+	}
+	availableRef, err := parseOCISourceForTagList(availableSource)
+	if err != nil {
+		return "", false
+	}
+	if currentRef.Repository != availableRef.Repository {
+		return "", false
+	}
+	currentVersion, err := strictSemverVersion(currentRef.Tag)
+	if err != nil {
+		return "", false
+	}
+	availableVersion, err := strictSemverVersion(availableRef.Tag)
+	if err != nil {
+		return "", false
+	}
+	if !availableVersion.GreaterThan(currentVersion) {
+		return "", false
+	}
+	if strings.TrimSpace(constraintExpr) != "" {
+		constraint, err := semver.NewConstraint(constraintExpr)
+		if err != nil || !constraint.Check(availableVersion) {
+			return "", false
+		}
+	}
+	return strings.TrimSpace(availableSource), true
+}
+
+func availableSourceViolatesCurrentPolicy(currentSource, availableSource, constraintExpr string) bool {
+	if strings.TrimSpace(availableSource) == "" {
+		return false
+	}
+	currentRef, err := parseOCISourceForTagList(currentSource)
+	if err != nil {
+		return true
+	}
+	availableRef, err := parseOCISourceForTagList(availableSource)
+	if err != nil {
+		return true
+	}
+	if currentRef.Repository != availableRef.Repository {
+		return true
+	}
+	currentVersion, err := strictSemverVersion(currentRef.Tag)
+	if err != nil {
+		return true
+	}
+	availableVersion, err := strictSemverVersion(availableRef.Tag)
+	if err != nil {
+		return true
+	}
+	if !availableVersion.GreaterThan(currentVersion) {
+		return true
+	}
+	if strings.TrimSpace(constraintExpr) == "" {
+		return false
+	}
+	constraint, err := semver.NewConstraint(constraintExpr)
+	if err != nil {
+		return true
+	}
+	return !constraint.Check(availableVersion)
+}
+
+func clearAvailableUpgrade(zarfPkg *opsv1alpha1.ZarfPackage, reason, message string) {
+	zarfPkg.Status.AvailableVersion = ""
+	zarfPkg.Status.AvailableSource = ""
+	apimeta.SetStatusCondition(&zarfPkg.Status.Conditions, metav1.Condition{
+		Type:               string(opsv1alpha1.ConditionTypeUpgradeAvailable),
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: zarfPkg.Generation,
+	})
+}
+
+type autoUpgradeDecision struct {
+	checked      bool
+	source       string
+	requeueAfter time.Duration
+}
+
+func (r *ZarfPackageReconciler) evaluateAutoUpgrade(
+	ctx context.Context,
+	log logr.Logger,
+	zarfPkg *opsv1alpha1.ZarfPackage,
+) autoUpgradeDecision {
+	policy := zarfPkg.Spec.UpgradePolicy
+	if policy == nil || !policy.Enabled {
+		return autoUpgradeDecision{}
+	}
+
+	interval := r.requeueAfter(zarfPkg)
+	decision := autoUpgradeDecision{checked: true, requeueAfter: interval}
+
+	currentSource := currentSemverSource(zarfPkg)
+	if availableSourceViolatesCurrentPolicy(currentSource, zarfPkg.Status.AvailableSource, policy.SemverConstraint) {
+		clearAvailableUpgrade(zarfPkg, ReasonUpgradeNotAvailable, "Previously discovered package source no longer matches the current upgrade policy")
+		return decision
+	}
+
+	generationChanged := zarfPkg.Status.ObservedGeneration != zarfPkg.Generation
+	failedPendingDue := shouldRefreshFailedPendingUpgrade(zarfPkg, zarfPkg.Status.AvailableSource, interval)
+	if pendingSource, ok := pendingAvailableSemverSource(currentSource, zarfPkg.Status.AvailableSource, policy.SemverConstraint); ok && !failedPendingDue {
+		decision.source = pendingSource
+		return decision
+	}
+	if zarfPkg.Status.LastUpgradeCheckTime != nil && !generationChanged {
+		elapsed := time.Since(zarfPkg.Status.LastUpgradeCheckTime.Time)
+		if elapsed < interval {
+			decision.requeueAfter = interval - elapsed
+			return decision
+		}
+	}
+
+	currentRef, err := parseOCISourceForTagList(currentSource)
+	if err != nil {
+		decision.requeueAfter = upgradeCheckFailureRequeue
+		r.recordUpgradeCheckFailure(zarfPkg, fmt.Sprintf("current source is not eligible for SemVer upgrades: %v", err))
+		return decision
+	}
+
+	credentialJSON, err := r.getRegistryCredentialJSON(ctx, zarfPkg)
+	if err != nil {
+		decision.requeueAfter = upgradeCheckFailureRequeue
+		r.recordUpgradeCheckFailure(zarfPkg, err.Error())
+		return decision
+	}
+
+	tags, err := r.getOCITagResolver().ListTags(ctx, zarfPkg.Spec.Source, ociTagResolveOptions{
+		PlainHTTP:              zarfPkg.Spec.PlainHTTP,
+		InsecureSkipTLSVerify:  zarfPkg.Spec.InsecureSkipTLSVerify,
+		RegistryCredentialJSON: credentialJSON,
+	})
+	if err != nil {
+		log.Error(err, "failed to check OCI tags for package upgrade", "source", zarfPkg.Spec.Source)
+		decision.requeueAfter = upgradeCheckFailureRequeue
+		r.recordUpgradeCheckFailure(zarfPkg, err.Error())
+		return decision
+	}
+
+	candidate, ok, err := selectLatestSemverUpgrade(currentRef.Tag, tags, policy.SemverConstraint)
+	if err != nil {
+		decision.requeueAfter = upgradeCheckFailureRequeue
+		r.recordUpgradeCheckFailure(zarfPkg, err.Error())
+		return decision
+	}
+
+	if !ok {
+		now := metav1.Now()
+		zarfPkg.Status.LastUpgradeCheckTime = &now
+		clearAvailableUpgrade(zarfPkg, ReasonUpgradeNotAvailable, "No newer semantic version tag is available")
+		return decision
+	}
+
+	sourceRef, err := parseOCISourceForTagList(zarfPkg.Spec.Source)
+	if err != nil {
+		decision.requeueAfter = upgradeCheckFailureRequeue
+		r.recordUpgradeCheckFailure(zarfPkg, fmt.Sprintf("source is not eligible for SemVer upgrades: %v", err))
+		return decision
+	}
+	now := metav1.Now()
+	zarfPkg.Status.LastUpgradeCheckTime = &now
+	resolvedSource := fmt.Sprintf("oci://%s:%s", sourceRef.Repository, candidate.Tag)
+	zarfPkg.Status.AvailableVersion = candidate.Version
+	zarfPkg.Status.AvailableSource = resolvedSource
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeUpgradeAvailable, metav1.ConditionTrue,
+		ReasonUpgradeAvailable, fmt.Sprintf("Discovered newer package source %s", resolvedSource))
+	if r.recorder != nil {
+		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonUpgradeAvailable,
+			fmt.Sprintf("Discovered newer package source %s", resolvedSource))
+	}
+	decision.source = resolvedSource
+	return decision
+}
+
+func shouldRefreshFailedPendingUpgrade(zarfPkg *opsv1alpha1.ZarfPackage, pendingSource string, interval time.Duration) bool {
+	if zarfPkg == nil {
+		return false
+	}
+	pendingSource = strings.TrimSpace(pendingSource)
+	if pendingSource == "" {
+		return false
+	}
+	if strings.TrimSpace(zarfPkg.Status.AvailableSource) != pendingSource {
+		return false
+	}
+	if strings.TrimSpace(zarfPkg.Status.LastAttemptedRevision) != pendingSource {
+		return false
+	}
+	if strings.TrimSpace(zarfPkg.Status.LastAttemptError) == "" && zarfPkg.Status.Phase != opsv1alpha1.ZarfPackagePhaseFailed {
+		return false
+	}
+	if zarfPkg.Status.LastUpgradeCheckTime == nil {
+		return true
+	}
+	return time.Since(zarfPkg.Status.LastUpgradeCheckTime.Time) >= interval
+}
+
+func (r *ZarfPackageReconciler) recordUpgradeCheckFailure(zarfPkg *opsv1alpha1.ZarfPackage, message string) {
+	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeUpgradeAvailable, metav1.ConditionFalse,
+		ReasonUpgradeCheckFailed, truncateMessage(message, 512))
+	if r.recorder != nil {
+		r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonUpgradeCheckFailed, truncateMessage(message, 512))
+	}
+}
+
+func (r *ZarfPackageReconciler) getOCITagResolver() ociTagResolver {
+	if r.OCITagResolver != nil {
+		return r.OCITagResolver
+	}
+	return defaultOCITagResolver{}
+}
+
+func (r *ZarfPackageReconciler) requeueAfter(zarfPkg *opsv1alpha1.ZarfPackage) time.Duration {
+	if zarfPkg == nil || zarfPkg.Spec.UpgradePolicy == nil || !zarfPkg.Spec.UpgradePolicy.Enabled {
+		return r.RequeueInterval
+	}
+	if strings.TrimSpace(zarfPkg.Spec.UpgradePolicy.Interval) == "" {
+		return r.RequeueInterval
+	}
+	interval, err := time.ParseDuration(zarfPkg.Spec.UpgradePolicy.Interval)
+	if err != nil || interval <= 0 {
+		return r.RequeueInterval
+	}
+	return interval
 }
 
 func (r *ZarfPackageReconciler) checkHelmDrift(ctx context.Context, deployedPkg *zarf.PackageInfo) (bool, []string) {
@@ -618,25 +997,20 @@ func (r *ZarfPackageReconciler) deploy(
 	zarfPkg *opsv1alpha1.ZarfPackage,
 	zarfClient zarf.Client,
 	original *opsv1alpha1.ZarfPackage,
+	source string,
 ) (ctrl.Result, error) {
+	if strings.TrimSpace(source) == "" {
+		source = zarfPkg.Spec.Source
+	}
 	ctx, span := tracer.Start(ctx, "Deploy", trace.WithAttributes(
-		attribute.String("source", zarfPkg.Spec.Source),
+		attribute.String("source", source),
 	))
 	defer span.End()
 	deployStart := time.Now()
 	wasFailed := zarfPkg.Status.Phase == opsv1alpha1.ZarfPackagePhaseFailed
 
-	log.Info("deploying package", "source", zarfPkg.Spec.Source)
-	zarfPkg.Status.LastAttemptedRevision = zarfPkg.Spec.Source
-
-	if strings.TrimSpace(zarfPkg.Status.PackageName) == "" {
-		metadata, metadataErr := zarfClient.GetPackageMetadata(ctx, zarfPkg.Spec.Source)
-		if metadataErr != nil {
-			log.V(1).Info("failed to resolve package metadata before deploy", "source", zarfPkg.Spec.Source, "error", metadataErr.Error())
-		} else if metadata != nil && strings.TrimSpace(metadata.Name) != "" {
-			zarfPkg.Status.PackageName = metadata.Name
-		}
-	}
+	log.Info("deploying package", "source", source)
+	zarfPkg.Status.LastAttemptedRevision = source
 
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeploying
 	r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeProgressing, metav1.ConditionTrue,
@@ -650,6 +1024,8 @@ func (r *ZarfPackageReconciler) deploy(
 	}
 	if patchErr := r.Status().Patch(ctx, zarfPkg, client.MergeFrom(original)); patchErr != nil {
 		log.Error(patchErr, "failed to persist Deploying status")
+	} else if original != nil {
+		original.Status = *zarfPkg.Status.DeepCopy()
 	}
 
 	// Build deploy options from spec
@@ -661,7 +1037,7 @@ func (r *ZarfPackageReconciler) deploy(
 	}
 
 	opts := zarf.DeployOptions{
-		Source:                  zarfPkg.Spec.Source,
+		Source:                  source,
 		Components:              zarfPkg.Spec.Components,
 		SetVariables:            parseSetVariables(zarfPkg.Spec.Set),
 		AdoptExistingResources:  zarfPkg.Spec.AdoptExistingResources,
@@ -768,7 +1144,7 @@ func (r *ZarfPackageReconciler) deploy(
 		return ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}, nil
 	}
 	r.observeDeployDuration(deployStart, "success")
-	r.applyDeploySuccessStatus(zarfPkg, result)
+	r.applyDeploySuccessStatus(zarfPkg, result, source)
 	if r.recorder != nil && zarfPkg.Spec.HelmDebugEnabled && len(result.DeployLogs) > 0 {
 		r.recorder.Event(zarfPkg, corev1.EventTypeNormal, ReasonHelmDebugLogs,
 			formatLogSummary(result.DeployLogs, 1024))
@@ -791,7 +1167,7 @@ func (r *ZarfPackageReconciler) deploy(
 		}
 	}
 
-	return ctrl.Result{RequeueAfter: r.RequeueInterval}, nil
+	return ctrl.Result{RequeueAfter: r.requeueAfter(zarfPkg)}, nil
 }
 
 func (r *ZarfPackageReconciler) deployPackage(
@@ -821,13 +1197,12 @@ func (r *ZarfPackageReconciler) resolveRegistryCredentials(
 	zarfPkg *opsv1alpha1.ZarfPackage,
 	opts *zarf.DeployOptions,
 ) *ctrl.Result {
-	ref := zarfPkg.Spec.RegistryCredentialSecretRef
-	if ref == "" {
+	dockerCfg, err := r.getRegistryCredentialJSON(ctx, zarfPkg)
+	if err == nil && len(dockerCfg) == 0 {
 		return nil
 	}
-
-	var secret corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Namespace: zarfPkg.Namespace, Name: ref}, &secret); err != nil {
+	if err != nil {
+		ref := zarfPkg.Spec.RegistryCredentialSecretRef
 		log.Error(err, "failed to get registry credential secret", "secret", ref)
 		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
 		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
@@ -842,25 +1217,27 @@ func (r *ZarfPackageReconciler) resolveRegistryCredentials(
 		return &result
 	}
 
-	dockerCfg, ok := secret.Data[".dockerconfigjson"]
-	if !ok {
-		log.Error(nil, "registry credential secret missing .dockerconfigjson key", "secret", ref)
-		zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseFailed
-		r.setCondition(zarfPkg, opsv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-			ReasonSecretNotFound, fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
-		if r.recorder != nil {
-			r.recorder.Event(zarfPkg, corev1.EventTypeWarning, ReasonSecretNotFound,
-				fmt.Sprintf("Secret %q missing .dockerconfigjson key", ref))
-		}
-		r.recordFailure(zarfPkg)
-		r.recordFailureMetric(ReasonSecretNotFound)
-		result := ctrl.Result{RequeueAfter: calculateBackoff(zarfPkg.Status.FailureCount)}
-		return &result
+	opts.RegistryCredentialJSON = dockerCfg
+	log.Info("resolved registry credentials from secret", "secret", zarfPkg.Spec.RegistryCredentialSecretRef)
+	return nil
+}
+
+func (r *ZarfPackageReconciler) getRegistryCredentialJSON(ctx context.Context, zarfPkg *opsv1alpha1.ZarfPackage) ([]byte, error) {
+	ref := zarfPkg.Spec.RegistryCredentialSecretRef
+	if ref == "" {
+		return nil, nil
 	}
 
-	opts.RegistryCredentialJSON = dockerCfg
-	log.Info("resolved registry credentials from secret", "secret", ref)
-	return nil
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: zarfPkg.Namespace, Name: ref}, &secret); err != nil {
+		return nil, err
+	}
+
+	dockerCfg, ok := secret.Data[".dockerconfigjson"]
+	if !ok {
+		return nil, fmt.Errorf("secret %q missing .dockerconfigjson key", ref)
+	}
+	return dockerCfg, nil
 }
 
 // resolveClusterKubeconfig looks up the Secret named by spec.clusterSecretRef
@@ -1018,7 +1395,7 @@ func (r *ZarfPackageReconciler) handleDeletion(
 		}
 	}
 	if original != nil {
-		original.Status = zarfPkg.Status
+		original.Status = *zarfPkg.Status.DeepCopy()
 	}
 
 	if zarfPkg.Status.PackageName != "" && zarfClient != nil {
@@ -1081,17 +1458,20 @@ func (r *ZarfPackageReconciler) handleDeletion(
 	return ctrl.Result{}, nil
 }
 
-func (r *ZarfPackageReconciler) applyDeploySuccessStatus(zarfPkg *opsv1alpha1.ZarfPackage, result *zarf.DeployResult) {
+func (r *ZarfPackageReconciler) applyDeploySuccessStatus(zarfPkg *opsv1alpha1.ZarfPackage, result *zarf.DeployResult, source string) {
 	zarfPkg.Status.PackageName = result.PackageName
 	zarfPkg.Status.DeployedVersion = result.Version
 	zarfPkg.Status.DeployedGeneration = result.Generation
-	zarfPkg.Status.Source = zarfPkg.Spec.Source
-	zarfPkg.Status.LastAttemptedRevision = zarfPkg.Spec.Source
+	zarfPkg.Status.Source = source
+	zarfPkg.Status.LastAttemptedRevision = source
 	zarfPkg.Status.LastAttemptError = ""
 	zarfPkg.Status.ComponentStatuses = r.convertComponentStatuses(result.DeployedComponents)
 	zarfPkg.Status.Phase = opsv1alpha1.ZarfPackagePhaseDeployed
 	zarfPkg.Status.DeployedSpecHash = zarfPkg.Spec.DeploymentHash()
 	r.resetFailures(zarfPkg)
+	if zarfPkg.Status.AvailableSource == source {
+		clearAvailableUpgrade(zarfPkg, ReasonUpgradeDeployed, "Latest discovered package source is deployed")
+	}
 
 	// Clear drift info after successful deploy (drift has been remediated).
 	zarfPkg.Status.DriftInfo = nil
